@@ -1,22 +1,29 @@
 {
-    "name": "homebridge-vantage-infusuion-controller",
-    "displayName": "Vantage Infusion Controller",
-    "version": "0.0.2",
-    "description": "VantageControls InFusion plugin for homebridge rewritten in typescript. Forked from original repo: https://github.com/thebeastxdxd/homebridge-vantage",
+    "name": "homebridge-vantage-infusion-controller",
+    "displayName": "Vantage InFusion Controller",
+    "version": "1.0.0",
+    "description": "Homebridge plugin for Vantage Controls InFusion systems. Supports unlimited devices, all accessory types (lights, dimmers, fans with speed, switches, outlets, thermostats), and auto-reconnect.",
     "main": "dist/homebridge-vantage-static.js",
     "scripts": {
         "clean": "rimraf ./dist",
         "build": "rimraf ./dist && tsc",
         "prepublishOnly": "npm run build",
-        "postpublish": "npm run clean",
-        "test": "echo \"Error: no test specified\" && exit 1"
+        "postpublish": "npm run clean"
     },
     "author": "richard pack",
+    "contributors": [
+        "Marco Arz"
+    ],
     "engines": {
-        "homebridge": ">=1.0.0"
+        "homebridge": ">=1.0.0",
+        "node": ">=12.0.0"
     },
     "keywords": [
-        "homebridge-plugin"
+        "homebridge-plugin",
+        "vantage",
+        "infusion",
+        "homekit",
+        "smart-home"
     ],
     "license": "MIT",
     "files": [
@@ -24,22 +31,15 @@
     ],
     "repository": {
         "type": "git",
-        "url": "https://github.com/richardpack/homebridge-vantage.git"
+        "url": "https://github.com/Marcoarz/homebridge-vantage.git"
     },
     "devDependencies": {
-        "@types/libxmljs": "^0.18.6",
-        "@types/node": "^10.17.19",
-        "@types/sleep": "^0.0.8",
-        "@types/xml2json": "^0.11.3",
+        "@types/node": "^16.0.0",
         "homebridge": "^1.0.4",
         "rimraf": "^3.0.2",
         "typescript": "^4.2.4"
     },
     "dependencies": {
-        "libxmljs": "^0.19.7",
-        "net": "^1.0.2",
-        "promise": "^8.0.3",
-        "sleep": "^6.3.0",
-        "xml2json": "^0.12.0"
+        "fast-xml-parser": "^4.5.0"
     }
 }

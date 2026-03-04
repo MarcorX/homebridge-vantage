@@ -1,14 +1,19 @@
 {
-    "platforms": [{
-        "platform": "VantageInfusion",
-        "ipaddress": "192.168.1,1"
-        }], 
-    "bridge": {
-        "username": "CC:22:3D:E3:CE:31", 
-        "name": "Vantage HomeBridge Adapter", 
-        "pin": "342-52-220", 
-        "port": 51826
-    }, 
-    "description": "My Fantastic Vantage System", 
-    "accessories": []
+  "platforms": [
+    {
+      "platform": "VantageInfusion",
+      "name": "VantageInfusion",
+      "ipaddress": "192.168.2.10",
+      "vidMapping": {
+        "217":  { "Type": "fan" },
+        "219":  { "Type": "fan" },
+        "1318": { "Type": "fan" },
+        "1336": { "Type": "fan" },
+        "1337": { "Type": "fan" },
+        "1338": { "Type": "fan" },
+        "1345": { "Type": "fan" },
+        "1346": { "Type": "fan" }
+      }
+    }
+  ]
 }

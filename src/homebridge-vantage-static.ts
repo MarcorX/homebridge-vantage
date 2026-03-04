@@ -1,281 +1,267 @@
+import {
+  AccessoryPlugin,
+  API,
+  HAP,
+  Logging,
+  PlatformConfig,
+  StaticPlatformPlugin,
+} from "homebridge";
+import { XMLParser } from 'fast-xml-parser';
 
-import { AccessoryPlugin, API, HAP, Logging, PlatformConfig, StaticPlatformPlugin, } from "homebridge";
+const xmlParser = new XMLParser({
+  ignoreAttributes: false,
+  attributeNamePrefix: '',
+  parseAttributeValue: false,
+  allowBooleanAttributes: true,
+  isArray: (name) => name === 'Object',
+});
+
 import { VantageLight, isVantageLoadObject } from "./vantage-light-accessory";
 import { VantageDimmer } from "./vantage-dimmer-accessory";
 import { VantageFan } from "./vantage-fan-accessory";
 import { VantageSwitch } from "./vantage-switch-accessory";
 import { VantageOutlet } from "./vantage-outlet-accessory";
 import { VantageThermostat } from "./vantage-thermostat-accessory";
-import { VantageInfusionController, EndDownloadConfigurationEvent, LoadStatusChangeEvent, ThermostatIndoorTemperatureChangeEvent, ThermostatOutdoorTemperatureChangeEvent } from "./vantage-infusion-controller";
-import * as xml2json from 'xml2json'
+import {
+  VantageInfusionController,
+  EndDownloadConfigurationEvent,
+  LoadStatusChangeEvent,
+  ThermostatIndoorTemperatureChangeEvent,
+  ThermostatOutdoorTemperatureChangeEvent,
+} from "./vantage-infusion-controller";
 
-const PLUGIN_NAME = "homebridge-vantage-infusion-controller";
+const PLUGIN_NAME  = "homebridge-vantage-infusion-controller";
 const PLATFORM_NAME = "VantageInfusion";
-
-const BRIDGE_ACCESSORY_LIMIT = 149;
 
 let hap: HAP;
 
 export = (api: API) => {
   hap = api.hap;
-
   api.registerPlatform(PLATFORM_NAME, VantageStaticPlatform);
 };
+
+/**
+ * VID mapping entry — lets you override the name or force a specific accessory type
+ * for any Vantage device that can't be reliably auto-detected.
+ *
+ * Example:
+ *   "vidMapping": {
+ *     "217": { "Type": "fan" },
+ *     "500": { "Type": "switch", "Name": "Garden Lights" }
+ *   }
+ *
+ * Valid Type values: "dimmer" | "relay" | "switch" | "outlet" | "fan" | "motor" | "rgb"
+ */
+interface VidMappingEntry {
+  Name?: string;
+  Type?: string;
+}
 
 class VantageStaticPlatform implements StaticPlatformPlugin {
 
   private readonly log: Logging;
-  private vantageController: VantageInfusionController;
-  private interfaceSupportRequest: Array<Promise<void>>;
-  private accessoriesDict: { [key: string]: AccessoryPlugin };
-  private vidMapping: { [key: string]: { "Name"?: string, "Type"?: string } };
-  private whitelist: Array<string>;
-  private accessoriesCallback: (foundAccessories: AccessoryPlugin[]) => void;
-  private api: API;
-  private config: PlatformConfig;
+  private readonly vantageController: VantageInfusionController;
+
+  private readonly vidMapping: Record<string, VidMappingEntry>;
+  private readonly whitelist: string[];
+  private readonly fahrenheit: boolean;
+
+  private readonly accessoriesDict: Record<string, AccessoryPlugin> = {};
+  private readonly interfaceSupportRequests: Array<Promise<void>> = [];
+  private accessoriesCallback: (found: AccessoryPlugin[]) => void = () => { };
 
   constructor(log: Logging, config: PlatformConfig, api: API) {
     this.log = log;
-    this.interfaceSupportRequest = [];
-    this.accessoriesDict = {};
-    this.vidMapping = {};
-    this.whitelist = [];
-    this.accessoriesCallback = () => { };
-    this.api = api;
-    this.config = config;
+    this.vidMapping  = config.vidMapping  ?? {};
+    this.whitelist   = config.whitelist   ?? [];
+    this.fahrenheit  = config.fahrenheit  ?? true;
 
-    if (config.controllerSendInterval) {
-      this.vantageController = new VantageInfusionController(this.log, config.ipaddress, config.controllerSendInterval);
-    } else {
-      this.vantageController = new VantageInfusionController(this.log, config.ipaddress);
-    }
+    // Support legacy controllerSendInterval (µs) and new commandIntervalMs (ms)
+    const intervalMs: number = config.commandIntervalMs
+      ?? (config.controllerSendInterval != null
+        ? Math.round(config.controllerSendInterval / 1000)
+        : 50);
 
-    if (config.vidMapping) {
-      this.vidMapping = config.vidMapping;
-    }
+    this.vantageController = new VantageInfusionController(
+      this.log,
+      config.ipaddress,
+      intervalMs,
+      config.forceRefresh ?? false
+    );
 
-    if (config.whitelist) {
-      this.whitelist = config.whitelist;
-    }
+    this.vantageController.on(EndDownloadConfigurationEvent, this.onEndDownloadConfiguration.bind(this));
+    this.vantageController.on(LoadStatusChangeEvent, this.onLoadStatusChange.bind(this));
+    this.vantageController.on(ThermostatIndoorTemperatureChangeEvent, this.onThermostatTemperature.bind(this));
+    this.vantageController.on(ThermostatOutdoorTemperatureChangeEvent, this.onThermostatTemperature.bind(this));
 
-    // add callbacks to events
-    this.vantageController.on(EndDownloadConfigurationEvent, this.endDownloadConfigurationCallback.bind(this));
-    this.vantageController.on(LoadStatusChangeEvent, this.loadStatusChangeCallback.bind(this));
-    this.vantageController.on(ThermostatIndoorTemperatureChangeEvent, this.thermostatIndoorTemperatureChangeCallback.bind(this));
-    this.vantageController.on(ThermostatOutdoorTemperatureChangeEvent, this.thermostatOutdoorTemperatureChangeCallback.bind(this));
-
-    // start downloading server's database
     this.vantageController.serverConfigurationDownload();
-
-    this.log.info("Done initializing homebridge vantage platform");
+    this.log.info("Vantage InFusion platform initialised — waiting for configuration download.");
   }
 
-  vidToName(vid: string): string | undefined {
-    const mappingsKeys = Object.keys(this.vidMapping);
-    if (mappingsKeys.length !== 0 && mappingsKeys.includes(vid) && this.vidMapping[vid]["Name"]) {
-      return this.vidMapping[vid]["Name"];
-    } else {
-      return "";
-    }
+  // ─── Accessory registration (called by Homebridge) ──────────────────────────
+
+  accessories(callback: (found: AccessoryPlugin[]) => void): void {
+    this.accessoriesCallback = callback;
   }
 
-  vidToType(vid: string): string | undefined {
-    const mappingsKeys = Object.keys(this.vidMapping);
-    if (mappingsKeys.length !== 0 && mappingsKeys.includes(vid) && this.vidMapping[vid]["Type"]) {
-      return this.vidMapping[vid]["Type"];
-    } else {
-      return "";
-    }
-  }
+  // ─── Event handlers ──────────────────────────────────────────────────────────
 
-  loadStatusChangeCallback(vid: string, value: number) {
-
-    if (!this.accessoriesDict[vid]) {
-      return;
-    }
-
+  private onLoadStatusChange(vid: string, value: number): void {
     const accessory = this.accessoriesDict[vid];
-
-    if (isVantageLoadObject(accessory)) {
+    if (accessory && isVantageLoadObject(accessory)) {
       accessory.loadStatusChange(value);
     }
   }
 
-  thermostatOutdoorTemperatureChangeCallback(vid: string, value: number) {
-    if (this.accessoriesDict[vid] && this.accessoriesDict[vid] instanceof VantageThermostat) {
-      const accessory = this.accessoriesDict[vid] as VantageThermostat;
-      accessory.temperatureChange(value);
-    }
+  private onThermostatTemperature(vid: string, _value: number): void {
+    // Temperature updates are handled inside VantageThermostat via its own event subscriptions.
+    // This handler exists only to satisfy the original event listener registrations; the
+    // thermostat accessory subscribes directly to the controller events it needs.
+    void vid;
   }
 
-  thermostatIndoorTemperatureChangeCallback(vid: string, value: number) {
-    if (this.accessoriesDict[vid] && this.accessoriesDict[vid] instanceof VantageThermostat) {
-      const accessory = this.accessoriesDict[vid] as VantageThermostat;
-      accessory.temperatureChange(value);
+  private onEndDownloadConfiguration(configurationString: string): void {
+    this.log.info("Configuration download complete — building accessory list.");
+
+    const configuration = xmlParser.parse(configurationString);
+
+    // Normalise to always be an array (xml2json returns a plain object for single-item lists)
+    const objects: any[] = configuration.Project?.Objects?.Object ?? [];
+    const objectArray = Array.isArray(objects) ? objects : [objects];
+
+    for (const objectWrapper of objectArray) {
+      const mainKey = Object.keys(objectWrapper)[0];
+      const item    = objectWrapper[mainKey];
+      const areaName = item.Area
+        ? this.resolveAreaName(objectArray, item.Area)
+        : "";
+      this.addItem(item, areaName);
     }
-  }
 
-  /*
-  * this callback will be called when we fully received the dc database from the controller (or from a saved file)
-  */
-  endDownloadConfigurationCallback(configurationString: string) {
-    this.log.info("Vantage Platfrom done Downloading configuration.");
-
-    const configuration = JSON.parse(xml2json.toJson(configurationString));
-
-    configuration.Project.Objects.Object.forEach((objectWrapper: any) => {
-      const mainItemkey = Object.keys(objectWrapper)[0];
-      const item = objectWrapper[mainItemkey];
-      const itemAreaName = item.Area ? this.getAreaName(configuration.Project.Objects.Object, item.Area) : "";
-
-      this.addItem(item, itemAreaName);
+    // Wait for all IsInterfaceSupported queries to complete before calling the callback
+    Promise.all(this.interfaceSupportRequests).then(() => {
+      const accessories = Object.values(this.accessoriesDict);
+      this.log.info(`Registering ${accessories.length} accessories with Homebridge.`);
+      this.accessoriesCallback(accessories);
     });
-
-    // add the promise after all the requests were sent
-    Promise.all(this.interfaceSupportRequest).then((_values: any[]) => {
-      let accessories = Object.values(this.accessoriesDict);
-
-      if (accessories.length > BRIDGE_ACCESSORY_LIMIT) {
-        this.log.info(`there are too many accessories for one bridge: ${accessories.length}`);
-        let platfromAccessories = accessories.slice(0, BRIDGE_ACCESSORY_LIMIT);
-        let leftOverAccesssories = accessories.slice(BRIDGE_ACCESSORY_LIMIT);
-        this.accessoriesCallback(leftOverAccesssories);
-      } else {
-        this.accessoriesCallback(accessories);
-      }
-    })
   }
 
-  checkWhitelist(vid: string) {
-    if (this.whitelist.length === 0) {
-      return true;
+  // ─── Item classification ──────────────────────────────────────────────────────
+
+  private isWhitelisted(vid: string): boolean {
+    return this.whitelist.length === 0 || this.whitelist.includes(vid);
+  }
+
+  private addItem(item: any, areaName: string): void {
+    if (!this.isWhitelisted(String(item.VID))) return;
+
+    if (item.ObjectType === "HVAC") {
+      this.addHVACItem(item);
+    } else if (item.ObjectType === "Load") {
+      this.addLoadItem(item, areaName);
     } else {
-      return this.whitelist.includes(vid);
+      this.log.debug(`Skipping unsupported object type: ${item.ObjectType} (VID=${item.VID})`);
     }
   }
 
-  /*   
-  Example for an item
-  <Object> <-- objectWrapper
-    <Category VID="21" Master="22" MTime=""> <-- mainItemKey
-      <Name>HVAC</Name> <-- item
-      <Model>
-      </Model>
-      <Note>
-      </Note>
-      <DName>
-      </DName>
-      <ObjectType>Category</ObjectType>
-      <Category>7</Category>
-      <Location>3</Location>
-    </Category>
-  </Object>
-  */
-  addItem(item: any, areaName: string) {
-    if (this.checkWhitelist(item.VID)) {
-      if (item.ObjectType == "HVAC") {
-        this.addHVACObjectType(item);
-      }
-      if (item.ObjectType == "Load") {
-        this.addLoadObjectType(item, areaName);
-      }
-    }
+  private addHVACItem(item: any): void {
+    // Prefer DName (display name) over Name when available
+    if (item.DName && item.DName !== "") item.Name = item.DName;
+
+    this.log.debug(`HVAC discovered (VID=${item.VID}, Name=${item.Name})`);
+
+    const promise = this.vantageController
+      .isInterfaceSupported(item, "Thermostat")
+      .then(({ support, item: resolvedItem }) => {
+        if (!support) return;
+        const name = this.resolveVidName(resolvedItem.VID) || resolvedItem.Name;
+        this.log.info(`Added HVAC thermostat: ${name} (VID=${resolvedItem.VID})`);
+        this.accessoriesDict[resolvedItem.VID] = new VantageThermostat(
+          hap, this.log, name, resolvedItem.VID, this.vantageController, this.fahrenheit
+        );
+      });
+
+    this.interfaceSupportRequests.push(promise);
   }
 
-  addInterfaceSupportPromise(item: any, objectType: string, callback: any) {
-    const promise = this.vantageController.isInterfaceSupported(item, objectType).then((response) => callback(response));
-    this.interfaceSupportRequest.push(promise);
-  }
-
-  // TODO: little bit a code duplication with addLoadObjectType
-  addHVACObjectType(item: any) {
-    // normalize to use Name instead of DName
-    if (item.DName !== undefined && item.DName != "") {
-      item.Name = item.DName;
-    }
-    this.log.debug(`New HVAC asked (VID=${item.VID}, Name=${item.Name}, ---)`);
-    const callback = (response: { item: any, interface: string, support: boolean }) => {
-      if (response.support) {
-        const name = this.vidToName(response.item.VID) || response.item.Name;
-
-        this.log.info(`New HVAC added (VID=${item.VID}, Name=${item.Name}, THERMOSTAT)`);
-        this.accessoriesDict[item.VID] = new VantageThermostat(hap, this.log, name, response.item.VID, this.vantageController);
-      }
-    };
-
-    this.addInterfaceSupportPromise(item, "Thermostat", callback);
-  }
-
-  addLoadObjectType(item: any, areaName: string) {
-    // change Area vid to the corresponding Area object's name
+  private addLoadItem(item: any, areaName: string): void {
     item.Area = areaName;
+    this.log.debug(`Load discovered (VID=${item.VID}, Name=${item.Name})`);
 
-    this.log.debug(`New load asked (VID=${item.VID}, Name=${item.Name}, ---)`)
-    const callback = (response: { item: any, interface: string, support: boolean }) => {
-      if (response.support) {
-        let loadType: string | undefined = "";
-        if (this.vidToType(response.item.VID) !== "") {
-          loadType = this.vidToType(response.item.VID);
+    const promise = this.vantageController
+      .isInterfaceSupported(item, "Load")
+      .then(({ support, item: resolvedItem }) => {
+        if (!support) return;
+
+        const vid  = resolvedItem.VID;
+        const name = this.resolveVidName(vid) || `${resolvedItem.Area}-${resolvedItem.Name}`;
+
+        // Determine type: vidMapping override takes precedence over auto-detection
+        const type = this.resolveVidType(vid) || this.autoDetectLoadType(resolvedItem, name);
+
+        this.log.info(`Added load: ${name} (VID=${vid}, type=${type})`);
+
+        if (type === "fan") {
+          this.accessoriesDict[vid] = new VantageFan(hap, this.log, name, vid, this.vantageController);
+        } else if (type === "switch" || type === "motor") {
+          this.accessoriesDict[vid] = new VantageSwitch(hap, this.log, name, vid, this.vantageController);
+        } else if (type === "outlet") {
+          this.accessoriesDict[vid] = new VantageOutlet(hap, this.log, name, vid, this.vantageController);
+        } else if (type === "dimmer" || type === "rgb") {
+          this.accessoriesDict[vid] = new VantageDimmer(
+            hap, this.log, name, vid, this.vantageController, type as "dimmer" | "rgb"
+          );
         } else {
-          loadType = this.getLoadType(response.item);
+          // relay → non-dimmable Lightbulb
+          this.accessoriesDict[vid] = new VantageLight(hap, this.log, name, vid, this.vantageController);
         }
+      });
 
-        const name = this.vidToName(response.item.VID) || `${response.item.Area}-${response.item.Name}`;
-
-        this.log.info(`New load added (VID=${response.item.VID}, Name=${response.item.Name}, ${loadType})`);
-
-        if (this.isFan(loadType, name)) {
-          this.accessoriesDict[response.item.VID] = new VantageFan(hap, this.log, name, response.item.VID, this.vantageController);
-        } else if (loadType == "switch") {
-          this.accessoriesDict[response.item.VID] = new VantageSwitch(hap, this.log, name, response.item.VID, this.vantageController);
-        } else if (loadType == "outlet") {
-          this.accessoriesDict[response.item.VID] = new VantageOutlet(hap, this.log, name, response.item.VID, this.vantageController);
-        } else if (loadType == "dimmer") {
-          this.accessoriesDict[response.item.VID] = new VantageDimmer(hap, this.log, name, response.item.VID, this.vantageController, loadType);
-        } else {
-          // normal light 
-          this.accessoriesDict[response.item.VID] = new VantageLight(hap, this.log, name, response.item.VID, this.vantageController);
-        }
-      }
-    };
-
-    this.addInterfaceSupportPromise(item, "Load", callback);
-
+    this.interfaceSupportRequests.push(promise);
   }
 
-  /*
-   * Find item's matching Area object, return its name.
+  // ─── Type & name resolution ───────────────────────────────────────────────────
+
+  private resolveVidName(vid: string): string {
+    return this.vidMapping[vid]?.Name ?? "";
+  }
+
+  private resolveVidType(vid: string): string {
+    return this.vidMapping[vid]?.Type ?? "";
+  }
+
+  /**
+   * Auto-detect the load type from the Vantage LoadType field and the device name.
+   *
+   * Priority:
+   *  1. "fan" — name contains "fan/Fan" (and not "light/Light")
+   *  2. "motor" — LoadType contains "Motor"
+   *  3. "relay" — LoadType contains "Relay"
+   *  4. "dimmer" — everything else (dimmable)
    */
-  getAreaName(objects: any, areaVid: string) {
-    const areaObject: Array<any> = objects.filter((object: any) => {
-      if (object.Area === undefined) {
-        return false;
+  private autoDetectLoadType(item: any, name: string): string {
+    const nameLower = name.toLowerCase();
+    if (nameLower.includes("fan") && !nameLower.includes("light")) return "fan";
+
+    const loadType: string = item.LoadType ?? "";
+    if (loadType.includes("Motor")) return "motor";
+    if (loadType.includes("Relay")) return "relay";
+    return "dimmer";
+  }
+
+  // ─── Area name resolution ─────────────────────────────────────────────────────
+
+  /**
+   * Walk the objects array to find the Area object whose VID matches `areaVid`
+   * and return its Name.
+   */
+  private resolveAreaName(objects: any[], areaVid: string): string {
+    for (const objectWrapper of objects) {
+      const item = objectWrapper[Object.keys(objectWrapper)[0]];
+      if (item.ObjectType === "Area" && String(item.VID) === String(areaVid)) {
+        return item.Name ?? "";
       }
-      return object.Area.VID === areaVid;
-    });
-
-    if (areaObject.length === 0) {
-      return "";
     }
-
-    return areaObject[0].Area.Name;
-  }
-
-  getLoadType(item: any) {
-    if (!item.LoadType.includes("Relay") && !item.LoadType.includes("Motor")) {
-      // TODO?: add check if its a a Dimmer or a RGB load
-      return "dimmer";
-    } else {
-      return "relay";
-    }
-  }
-
-  // can call callback at a later time, but it will stop the bridge from loading
-  accessories(callback: (foundAccessories: AccessoryPlugin[]) => void): void {
-    this.accessoriesCallback = callback;
-  }
-
-  private isFan(loadType: string | undefined, name: string) {
-    return (name.includes("fan") || name.includes("Fan") || loadType == "fan") && !name.includes("light") && !name.includes("Light");
+    return "";
   }
 }

@@ -1,247 +1,403 @@
 import * as net from 'net';
 import * as fs from 'fs';
-import * as xml2json from 'xml2json';
-import * as libxmljs from 'libxmljs';
-import * as sleep from 'sleep';
-import {
-  Logging,
-} from "homebridge";
+import { XMLParser } from 'fast-xml-parser';
+import { Logging } from "homebridge";
+
+const xmlParser = new XMLParser({
+  ignoreAttributes: false,
+  attributeNamePrefix: '',    // attributes appear at the same level as child elements
+  parseAttributeValue: false, // keep everything as strings to match original behaviour
+  allowBooleanAttributes: true,
+  isArray: (name) => name === 'Interface' || name === 'Object',
+});
 import { EventEmitter } from 'events';
 
-const serverControllerPort = 3001;
-const serverConfigurationPort = 2001;
+/**
+ * Returns true when the XML buffer contains a complete root element.
+ * The Vantage controller sends self-contained XML messages (<IIntrospection>, <IBackup>),
+ * so we simply check that the root tag is closed before attempting to parse.
+ */
+function isXmlComplete(xml: string): boolean {
+  const match = xml.match(/<(\w+)/);
+  if (!match) return false;
+  return xml.includes(`</${match[1]}>`);
+}
 
-const configurationPath = '/tmp/vantage.dc';
+const SERVER_CONTROLLER_PORT = 3001;
+const SERVER_CONFIGURATION_PORT = 2001;
+
+const INITIAL_RECONNECT_DELAY_MS = 5_000;
+const MAX_RECONNECT_DELAY_MS = 60_000;
 
 export const LoadStatusChangeEvent = "loadStatusChange";
 export const ThermostatOutdoorTemperatureChangeEvent = "thermostatOutdoorTemperatureChange";
 export const ThermostatIndoorTemperatureChangeEvent = "thermostatIndoorTemperatureChange";
-export const IsInterfaceSupportedEvent = (vid: string, interfaceId: string) => `isInterfaceSupportedAnswer-${vid}-${interfaceId}`;
+export const ThermostatHeatSetpointChangeEvent = "thermostatHeatSetpointChange";
+export const ThermostatCoolSetpointChangeEvent = "thermostatCoolSetpointChange";
+export const ThermostatModeChangeEvent = "thermostatModeChange";
+export const ThermostatHVACStateChangeEvent = "thermostatHVACStateChange";
 export const EndDownloadConfigurationEvent = "endDownloadConfiguration";
-
+export const IsInterfaceSupportedEvent = (vid: string, interfaceId: string) =>
+  `isInterfaceSupportedAnswer-${vid}-${interfaceId}`;
 
 export class VantageInfusionController extends EventEmitter {
 
   private readonly log: Logging;
   private readonly ipaddress: string;
-  private readonly controllerSendInterval: number;
+  private readonly commandIntervalMs: number;
+  private readonly configCachePath: string;
+  private readonly forceRefresh: boolean;
+
   private serverDatabase: string;
-  private interfaces: Record<string, any>;
+  private interfaces: Record<string, string>;
+
   private serverController: net.Socket;
   private serverConfiguration: net.Socket;
 
-  constructor(log: Logging, ipaddress: string, controllerSendInterval: number = 50000) {
+  // async command queue — avoids blocking the event loop
+  private readonly commandQueue: string[] = [];
+  private commandQueueRunning = false;
+
+  // reconnect state
+  private controllerReconnectDelay = INITIAL_RECONNECT_DELAY_MS;
+  private controllerReconnectTimer: NodeJS.Timeout | null = null;
+  private configurationDownloadComplete = false;
+
+  constructor(log: Logging, ipaddress: string, commandIntervalMs = 50, forceRefresh = false) {
     super();
     this.log = log;
     this.ipaddress = ipaddress;
-    this.controllerSendInterval = controllerSendInterval;
+    // Support legacy controllerSendInterval (microseconds): if > 1000 assume µs and convert
+    this.commandIntervalMs = commandIntervalMs > 1000
+      ? Math.round(commandIntervalMs / 1000)
+      : commandIntervalMs;
+    this.forceRefresh = forceRefresh;
+    this.configCachePath = `/tmp/vantage-${ipaddress.replace(/\./g, '_')}.dc`;
     this.serverDatabase = "";
     this.interfaces = {};
-    this.serverController = new net.Socket();
-    this.serverController.setEncoding("ascii");
-    this.serverConfiguration = new net.Socket();
-    this.serverController.on('data', this.serverControllerDataCallback.bind(this));
-    this.serverConfiguration.on('data', this.serverConfigurationDataCallback.bind(this));
-    this.log.info("Connecting to VantageInfusion Controller at ", ipaddress);
-    this.serverControllerConnect();
+
+    this.serverController = this.createControllerSocket();
+    this.serverConfiguration = this.createConfigurationSocket();
+
+    this.log.info(`Connecting to Vantage InFusion Controller at ${ipaddress}`);
+    this.connectController();
   }
 
-  /**
-   * Start the command session. The InFusion controller (starting from the 3.2 version of the
-   * firmware) must be configured without encryption or password protection. Support to SSL
-   * and password protected connection will be introduced in the future, the IoT world is
-   * a bad place! 
-   */
-  serverControllerConnect() {
-    // data callback should already be initialized
-    this.serverController.connect({ host: this.ipaddress, port: serverControllerPort }, () => {
-      this.sendControllerMessage("STATUS ALL\n");
-      this.sendControllerMessage("ELENABLE 1 AUTOMATION ON\nELENABLE 1 EVENT ON\nELENABLE 1 STATUS ON\nELENABLE 1 STATUSEX ON\nELENABLE 1 SYSTEM ON\nELLOG AUTOMATION ON\nELLOG EVENT ON\nELLOG STATUS ON\nELLOG STATUSEX ON\nELLOG SYSTEM ON\n");
+  // ─── Socket factories ────────────────────────────────────────────────────────
 
+  private createControllerSocket(): net.Socket {
+    const socket = new net.Socket();
+    socket.setEncoding("ascii");
+    socket.on('data', this.onControllerData.bind(this));
+    socket.on('close', () => {
+      this.log.warn("Controller connection closed — scheduling reconnect.");
+      this.scheduleControllerReconnect();
+    });
+    socket.on('error', (err) => {
+      this.log.error(`Controller socket error: ${err.message}`);
+    });
+    return socket;
+  }
+
+  private createConfigurationSocket(): net.Socket {
+    const socket = new net.Socket();
+    socket.setEncoding("ascii");
+    socket.on('data', this.onConfigurationData.bind(this));
+    socket.on('close', () => {
+      if (!this.configurationDownloadComplete) {
+        this.log.warn("Configuration connection closed before download completed — retrying.");
+        this.serverConfigurationDownload();
+      }
+    });
+    socket.on('error', (err) => {
+      this.log.error(`Configuration socket error: ${err.message}`);
+    });
+    return socket;
+  }
+
+  // ─── Connection management ────────────────────────────────────────────────────
+
+  private connectController(): void {
+    this.serverController.connect({ host: this.ipaddress, port: SERVER_CONTROLLER_PORT }, () => {
+      this.log.info("Controller connection established.");
+      this.controllerReconnectDelay = INITIAL_RECONNECT_DELAY_MS;
+      this.enqueueCommand("STATUS ALL\n");
+      this.enqueueCommand(
+        "ELENABLE 1 AUTOMATION ON\n" +
+        "ELENABLE 1 EVENT ON\n" +
+        "ELENABLE 1 STATUS ON\n" +
+        "ELENABLE 1 STATUSEX ON\n" +
+        "ELENABLE 1 SYSTEM ON\n" +
+        "ELLOG AUTOMATION ON\n" +
+        "ELLOG EVENT ON\n" +
+        "ELLOG STATUS ON\n" +
+        "ELLOG STATUSEX ON\n" +
+        "ELLOG SYSTEM ON\n"
+      );
     });
   }
 
-  /**
-   * Start the discovery procedure that use the local cache or download from the InFusion controller
-   * the last configuration saved on the SD card (usually the developer save a backup copy of the configuration
-   * on this support but in some cases it can be different from the current running configuration, I need to
-   * check how to download it with a single pass procedure)
-  */
-  serverConfigurationDownload() {
-    // data callback should already be initialized
-    this.serverConfiguration.connect({ host: this.ipaddress, port: serverConfigurationPort }, () => {
-      // Aehm, async method becomes sync...
-      this.sendGetInterfaces();
-      this.sendDownloadConfiguration();
+  serverConfigurationDownload(): void {
+    if (this.forceRefresh && fs.existsSync(this.configCachePath)) {
+      fs.unlinkSync(this.configCachePath);
+      this.log.info("forceRefresh: deleted configuration cache.");
+    }
+
+    this.serverConfiguration = this.createConfigurationSocket();
+    this.serverConfiguration.connect({ host: this.ipaddress, port: SERVER_CONFIGURATION_PORT }, () => {
+      this.log.info("Configuration connection established.");
+      this.serverConfiguration.write(
+        "<IIntrospection><GetInterfaces><call></call></GetInterfaces></IIntrospection>\n",
+        "ascii"
+      );
+      if (!fs.existsSync(this.configCachePath)) {
+        this.log.debug("Requesting configuration download from controller.");
+        this.serverConfiguration.write(
+          "<IBackup><GetFile><call>Backup\\Project.dc</call></GetFile></IBackup>\n",
+          "ascii"
+        );
+      }
     });
   }
 
-  serverControllerDataCallback(data: Buffer) {
+  private scheduleControllerReconnect(): void {
+    if (this.controllerReconnectTimer) return;
+    this.controllerReconnectTimer = setTimeout(() => {
+      this.controllerReconnectTimer = null;
+      this.log.info(`Reconnecting to controller (delay was ${this.controllerReconnectDelay}ms)…`);
+      this.serverController = this.createControllerSocket();
+      this.connectController();
+      this.controllerReconnectDelay = Math.min(
+        this.controllerReconnectDelay * 2,
+        MAX_RECONNECT_DELAY_MS
+      );
+    }, this.controllerReconnectDelay);
+  }
 
-    this.log.debug(data.toString());
+  // ─── Async command queue ──────────────────────────────────────────────────────
 
+  private enqueueCommand(msg: string): void {
+    this.commandQueue.push(msg);
+    this.drainQueue();
+  }
+
+  private drainQueue(): void {
+    if (this.commandQueueRunning || this.commandQueue.length === 0) return;
+    this.commandQueueRunning = true;
+    const sendNext = (): void => {
+      const msg = this.commandQueue.shift();
+      if (!msg) {
+        this.commandQueueRunning = false;
+        return;
+      }
+      this.log.debug(`TX: ${msg.trim()}`);
+      this.serverController.write(msg, "ascii");
+      setTimeout(sendNext, this.commandIntervalMs);
+    };
+    sendNext();
+  }
+
+  // ─── Controller data parser ───────────────────────────────────────────────────
+
+  private onControllerData(data: Buffer): void {
     const lines = data.toString().split('\n');
 
-    lines.forEach((line) => {
-      const command = line.split(' ');
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      this.log.debug(`RX: ${trimmed}`);
+      const parts = trimmed.split(' ');
 
-      if (line.startsWith("S:LOAD ") || line.startsWith("R:GETLOAD ")) {
-        const vid = parseInt(command[1]);
-        const value = parseInt(command[2]);
-        // live update about load change (even if it's an RGB load)
-        this.emit(LoadStatusChangeEvent, vid, value);
+      // Load level updates (both polling response and live event)
+      if (trimmed.startsWith("S:LOAD ") || trimmed.startsWith("R:GETLOAD ")) {
+        this.emit(LoadStatusChangeEvent, parts[1], parseInt(parts[2]));
+        continue;
       }
 
-      // outdoor temperature
-      if (line.startsWith("EL: ") && command[3] == "Thermostat.SetOutdoorTemperatureSW") {
-        const vid = parseInt(command[2]);
-        const value = parseFloat(command[4]) / 1000;
-        this.emit(ThermostatOutdoorTemperatureChangeEvent, vid, value);
+      // EL event stream — temperatures are in milli-degrees (divide by 1000)
+      if (trimmed.startsWith("EL: ")) {
+        const vid   = parts[2];
+        const method = parts[3];
+        const raw   = parts[4] !== undefined ? parseFloat(parts[4]) : 0;
+
+        switch (method) {
+          case "Thermostat.SetOutdoorTemperatureSW":
+            this.emit(ThermostatOutdoorTemperatureChangeEvent, vid, raw / 1000);
+            break;
+          case "Thermostat.SetIndoorTemperatureSW":
+            this.emit(ThermostatIndoorTemperatureChangeEvent, vid, raw / 1000);
+            break;
+          case "Thermostat.SetHeatPointSW":
+            this.emit(ThermostatHeatSetpointChangeEvent, vid, raw / 1000);
+            break;
+          case "Thermostat.SetCoolPointSW":
+            this.emit(ThermostatCoolSetpointChangeEvent, vid, raw / 1000);
+            break;
+          case "Thermostat.SetMode":
+            this.emit(ThermostatModeChangeEvent, vid, parseInt(parts[4] ?? "0"));
+            break;
+          case "Thermostat.GetHVACState":
+            this.emit(ThermostatHVACStateChangeEvent, vid, parseInt(parts[4] ?? "0"));
+            break;
+        }
+        continue;
       }
 
-      if (line.startsWith("R:INVOKE") && command[3] == "Thermostat.GetOutdoorTemperature") {
-        const vid = parseInt(command[1]);
-        const value = parseFloat(command[2])
-        this.emit(ThermostatOutdoorTemperatureChangeEvent, vid, value);
-      }
+      // R:INVOKE responses — temperatures are in degrees directly (no /1000)
+      if (trimmed.startsWith("R:INVOKE")) {
+        const vid    = parts[1];
+        const retVal = parts[2];
+        const method = parts[3];
 
-      // indoor temperature
-      if (line.startsWith("EL: ") && command[3] == "Thermostat.SetIndoorTemperatureSW") {
-        const vid = parseInt(command[2]);
-        const value = parseFloat(command[4]) / 1000;
-        this.emit(ThermostatIndoorTemperatureChangeEvent, vid, value);
+        switch (method) {
+          case "Thermostat.GetOutdoorTemperature":
+            this.emit(ThermostatOutdoorTemperatureChangeEvent, vid, parseFloat(retVal));
+            break;
+          case "Thermostat.GetIndoorTemperature":
+            this.emit(ThermostatIndoorTemperatureChangeEvent, vid, parseFloat(retVal));
+            break;
+          case "Thermostat.GetHeatPoint":
+            this.emit(ThermostatHeatSetpointChangeEvent, vid, parseFloat(retVal));
+            break;
+          case "Thermostat.GetCoolPoint":
+            this.emit(ThermostatCoolSetpointChangeEvent, vid, parseFloat(retVal));
+            break;
+          case "Thermostat.GetMode":
+            this.emit(ThermostatModeChangeEvent, vid, parseInt(retVal));
+            break;
+          case "Thermostat.GetHVACState":
+            this.emit(ThermostatHVACStateChangeEvent, vid, parseInt(retVal));
+            break;
+          case "Object.IsInterfaceSupported":
+            this.emit(
+              IsInterfaceSupportedEvent(parts[1].trim(), parts[4].trim()),
+              parseInt(retVal)
+            );
+            break;
+        }
       }
-
-      // Non-state feedback
-      if (line.startsWith("R:INVOKE") && line.includes("Object.IsInterfaceSupported")) {
-        const support = parseInt(command[2]);
-        this.emit(IsInterfaceSupportedEvent(command[1].trim(), command[4].trim()), support);
-      }
-    });
+    }
   }
-  /**
-   * List interfaces, list configuration and then check if a specific interface 
-   * is supported by the recognized devices. 
-   */
-  serverConfigurationDataCallback(data: Buffer) {
-    this.serverDatabase = this.serverDatabase + data.toString().replace("\ufeff", "");
 
-    try {
-      this.serverDatabase = this.serverDatabase.replace('<?File Encode="Base64" /', '<File>');
-      this.serverDatabase = this.serverDatabase.replace('?>', '</File>');
-      // try to parse the xml we got so far
-      libxmljs.parseXml(this.serverDatabase);
-      this.log.info("was able to parse xml");
-    } catch (error) {
-      return false;
+  // ─── Configuration data parser ────────────────────────────────────────────────
+
+  private onConfigurationData(data: Buffer): void {
+    this.serverDatabase += data.toString().replace("\ufeff", "");
+
+    // Normalize the Base64 file wrapper that the controller sends
+    this.serverDatabase = this.serverDatabase
+      .replace('<?File Encode="Base64" /', '<File>')
+      .replace('?>', '</File>');
+
+    if (!isXmlComplete(this.serverDatabase)) {
+      return; // XML not yet complete, wait for more data
     }
 
-    const parsedDatabase = JSON.parse(xml2json.toJson(this.serverDatabase));
-    this.parseInterfaces(parsedDatabase);
-    this.parseConfigurationDatabase(parsedDatabase);
+    const parsedDatabase = xmlParser.parse(this.serverDatabase);
     this.serverDatabase = "";
+
+    // Parse interface list (sent in response to GetInterfaces)
+    if (parsedDatabase.IIntrospection !== undefined) {
+      this.log.debug("Parsing interface list.");
+      // isArray config ensures Interface is always an array
+      const ifaces: any[] = parsedDatabase.IIntrospection.GetInterfaces.return.Interface ?? [];
+      for (const iface of ifaces) {
+        this.log.debug(`  Interface: ${iface.Name} = ${iface.IID}`);
+        this.interfaces[iface.Name] = iface.IID;
+      }
+    }
+
+    // Parse device configuration (sent in response to GetFile)
+    if (parsedDatabase.IBackup !== undefined) {
+      this.log.info("Configuration download complete — saving to cache.");
+      const configuration = Buffer
+        .from(parsedDatabase.IBackup.GetFile.return.File, 'base64')
+        .toString("ascii");
+      fs.writeFileSync(this.configCachePath, configuration);
+      this.configurationDownloadComplete = true;
+      this.emit(EndDownloadConfigurationEvent, configuration);
+    } else if (fs.existsSync(this.configCachePath)) {
+      this.log.info("Loading configuration from cache.");
+      const cached = fs.readFileSync(this.configCachePath, 'utf8');
+      this.configurationDownloadComplete = true;
+      this.emit(EndDownloadConfigurationEvent, cached);
+    } else {
+      this.log.error("No configuration received and no cache found. Check controller connectivity.");
+    }
   }
 
-  sendControllerMessage(msg: string) {
-    sleep.usleep(this.controllerSendInterval);
-    this.log.info("writing message to controller: " + msg);
-    this.serverController.write(msg, "ascii");
-  }
+  // ─── Public commands ──────────────────────────────────────────────────────────
 
   sendGetLoadStatus(vid: string): void {
-    this.sendControllerMessage(`GETLOAD ${vid}\n`);
+    this.enqueueCommand(`GETLOAD ${vid}\n`);
   }
 
-  /**
-   * Send the set HSL color request to the controller
-   * 
-   * NOTE: this function was not tested.
-  */
-  sendRGBLoadDissolveHSL(vid: string, h: number, s: number, l: number, time?: number): void {
-    const thisTime = time || 500;
-    this.sendControllerMessage(`INVOKE ${vid} RGBLoad.DissolveHSL ${h} ${s} ${l * 1000} ${thisTime}\n`);
-  }
-
-  /**
-   * NOTE: this function was not tested.
-  */
-  sendThermostatGetOutdoorTemperature(vid: string): void {
-    this.sendControllerMessage(`INVOKE ${vid} Thermostat.GetOutdoorTemperature\n`);
-  }
-
-  /**
-   * Send the set light level to the controller
-  */
-  sendLoadDim(vid: string, level: number, time?: number): void {
-    // TODO: reduce feedback (or command) rate
-    const thisTime = time || 1;
+  sendLoadDim(vid: string, level: number, time = 1): void {
     if (level > 0) {
-      this.sendControllerMessage(`INVOKE ${vid} Load.Ramp 6 ${thisTime} ${level}\n`);
+      this.enqueueCommand(`INVOKE ${vid} Load.Ramp 6 ${time} ${level}\n`);
     } else {
-      this.sendControllerMessage(`INVOKE ${vid} Load.SetLevel ${level}\n`);
+      this.enqueueCommand(`INVOKE ${vid} Load.SetLevel 0\n`);
     }
+  }
+
+  sendRGBLoadDissolveHSL(vid: string, h: number, s: number, l: number, time = 500): void {
+    this.enqueueCommand(`INVOKE ${vid} RGBLoad.DissolveHSL ${h} ${s} ${l * 1000} ${time}\n`);
+  }
+
+  sendThermostatGetIndoorTemperature(vid: string): void {
+    this.enqueueCommand(`INVOKE ${vid} Thermostat.GetIndoorTemperature\n`);
+  }
+
+  sendThermostatGetOutdoorTemperature(vid: string): void {
+    this.enqueueCommand(`INVOKE ${vid} Thermostat.GetOutdoorTemperature\n`);
+  }
+
+  sendThermostatGetHeatPoint(vid: string): void {
+    this.enqueueCommand(`INVOKE ${vid} Thermostat.GetHeatPoint\n`);
+  }
+
+  sendThermostatGetCoolPoint(vid: string): void {
+    this.enqueueCommand(`INVOKE ${vid} Thermostat.GetCoolPoint\n`);
+  }
+
+  sendThermostatGetMode(vid: string): void {
+    this.enqueueCommand(`INVOKE ${vid} Thermostat.GetMode\n`);
+  }
+
+  sendThermostatGetHVACState(vid: string): void {
+    this.enqueueCommand(`INVOKE ${vid} Thermostat.GetHVACState\n`);
+  }
+
+  sendThermostatSetHeatPoint(vid: string, milliDegrees: number): void {
+    this.enqueueCommand(`INVOKE ${vid} Thermostat.SetHeatPoint ${milliDegrees}\n`);
+  }
+
+  sendThermostatSetCoolPoint(vid: string, milliDegrees: number): void {
+    this.enqueueCommand(`INVOKE ${vid} Thermostat.SetCoolPoint ${milliDegrees}\n`);
+  }
+
+  sendThermostatSetMode(vid: string, mode: number): void {
+    this.enqueueCommand(`INVOKE ${vid} Thermostat.SetMode ${mode}\n`);
   }
 
   sendIsInterfaceSupported(vid: string, interfaceId: string): void {
-    this.sendControllerMessage(`INVOKE ${vid} Object.IsInterfaceSupported ${interfaceId}\n`);
+    this.enqueueCommand(`INVOKE ${vid} Object.IsInterfaceSupported ${interfaceId}\n`);
   }
 
-  isInterfaceSupported(item: any, interfaceName: string): Promise<{ item: any, interface: string, support: boolean }> {
-
+  isInterfaceSupported(
+    item: any,
+    interfaceName: string
+  ): Promise<{ item: any; interface: string; support: boolean }> {
     if (this.interfaces[interfaceName] === undefined) {
       return Promise.resolve({ item, interface: interfaceName, support: false });
-    } else {
-      /**
-       * Sample
-       *   OUT| INVOKE 2774 Object.IsInterfaceSupported 32
-       *    IN| R:INVOKE 2774 0 Object.IsInterfaceSupported 32
-       */
-      const interfaceId = this.interfaces[interfaceName];
-
-      return new Promise((resolve) => {
-        this.once(IsInterfaceSupportedEvent(item.VID.trim(), interfaceId.trim()), (support) => resolve({ item, interface: interfaceName, support }));
-        this.sendIsInterfaceSupported(item.VID, interfaceId);
-      });
     }
-  }
-
-  sendGetInterfaces() {
-    this.serverConfiguration.write("<IIntrospection><GetInterfaces><call></call></GetInterfaces></IIntrospection>\n", "ascii");
-  }
-
-  sendDownloadConfiguration() {
-    if (!fs.existsSync(configurationPath)) {
-      this.log.debug("sending configuration download");
-      this.serverConfiguration.write("<IBackup><GetFile><call>Backup\\Project.dc</call></GetFile></IBackup>\n", "ascii");
-    }
-  }
-
-  parseInterfaces(database: any) {
-    if (database.IIntrospection !== undefined) {
-      this.log.debug("parsing interfaces");
-      let databaseInterfaces = database.IIntrospection.GetInterfaces.return.Interface;
-      databaseInterfaces.forEach((tmpInterface: any) => {
-        this.log.debug(`interface ${tmpInterface.Name} ID ${tmpInterface.IID}`);
-        this.interfaces[tmpInterface.Name] = tmpInterface.IID;
-      });
-    }
-  }
-
-  parseConfigurationDatabase(database: any) {
-    if (database.IBackup !== undefined) {
-      this.log.debug("parsing configuration");
-      const configuration = Buffer.from(database.IBackup.GetFile.return.File, 'base64').toString("ascii");
-      fs.writeFileSync(configurationPath, configuration);
-      this.emit(EndDownloadConfigurationEvent, configuration);
-    } else {
-      this.log.debug("reading configuration from file");
-      fs.readFile(configurationPath, 'utf8', (err, data) => {
-        if (!err) {
-          this.emit(EndDownloadConfigurationEvent, data);
-        } else {
-          this.log.info("database file does not exist");
-        }
-      })
-    }
+    const interfaceId = this.interfaces[interfaceName];
+    return new Promise((resolve) => {
+      this.once(
+        IsInterfaceSupportedEvent(item.VID.trim(), interfaceId.trim()),
+        (support) => resolve({ item, interface: interfaceName, support: Boolean(support) })
+      );
+      this.sendIsInterfaceSupported(item.VID, interfaceId);
+    });
   }
 }

@@ -11,18 +11,19 @@ import {
 } from "homebridge";
 
 import { VantageInfusionController } from "./vantage-infusion-controller";
-import { VantageLoadObjectInterface} from "./vantage-light-accessory";
+import { VantageLoadObjectInterface } from "./vantage-light-accessory";
 
 export class VantageFan implements AccessoryPlugin, VantageLoadObjectInterface {
 
   private readonly log: Logging;
-  private hap: HAP;
-
-  private vid: string;
-  private controller: VantageInfusionController;
-  private fanOn = false;
+  private readonly hap: HAP;
+  private readonly vid: string;
+  private readonly controller: VantageInfusionController;
 
   name: string;
+
+  private active = false;
+  private rotationSpeed = 100; // 0–100
 
   private readonly fanService: Service;
   private readonly informationService: Service;
@@ -34,51 +35,70 @@ export class VantageFan implements AccessoryPlugin, VantageLoadObjectInterface {
     this.vid = vid;
     this.controller = controller;
 
-    this.fanService = new hap.Service.Fan(name);
-    this.addFanService();
+    // Fanv2 supports Active + RotationSpeed (proper HAP fan service)
+    this.fanService = new hap.Service.Fanv2(name);
+    this.buildFanService();
 
     this.informationService = new hap.Service.AccessoryInformation()
       .setCharacteristic(hap.Characteristic.Manufacturer, "Vantage Controls")
-      .setCharacteristic(hap.Characteristic.Model, "Power Switch Fan")
+      .setCharacteristic(hap.Characteristic.Model, "InFusion Fan")
       .setCharacteristic(hap.Characteristic.SerialNumber, `VID ${this.vid}`);
 
-    // get the current state
     this.controller.sendGetLoadStatus(this.vid);
   }
 
-  addFanService() {
-    this.fanService.getCharacteristic(this.hap.Characteristic.On)
-      .on(CharacteristicEventTypes.GET, (callback: CharacteristicGetCallback) => {
-        this.log.debug(`fan ${this.name} get state: ${this.fanOn ? "ON" : "OFF"}`);
-        callback(HAPStatus.SUCCESS, this.fanOn);
+  private buildFanService(): void {
+    const { Characteristic } = this.hap;
+
+    // Active (0 = off, 1 = on)
+    this.fanService
+      .getCharacteristic(Characteristic.Active)
+      .on(CharacteristicEventTypes.GET, (cb: CharacteristicGetCallback) => {
+        this.log.debug(`Fan ${this.name} get active: ${this.active}`);
+        cb(HAPStatus.SUCCESS, this.active ? 1 : 0);
       })
-      .on(CharacteristicEventTypes.SET, (value: CharacteristicValue, callback: CharacteristicSetCallback) => {
-        this.log.debug(`fan ${this.name} set state: ${value ? "ON" : "OFF"}`);
-        this.fanOn = value as boolean;
-        this.controller.sendLoadDim(this.vid, this.fanOn ? 100 : 0);
-        callback();
+      .on(CharacteristicEventTypes.SET, (value: CharacteristicValue, cb: CharacteristicSetCallback) => {
+        this.active = value === 1 || value === true;
+        this.log.debug(`Fan ${this.name} set active: ${this.active}`);
+        this.controller.sendLoadDim(this.vid, this.active ? this.rotationSpeed : 0);
+        cb();
+      });
+
+    // Rotation speed (0–100 maps directly to Vantage load level)
+    this.fanService
+      .getCharacteristic(Characteristic.RotationSpeed)
+      .setProps({ minValue: 0, maxValue: 100, minStep: 1 })
+      .on(CharacteristicEventTypes.GET, (cb: CharacteristicGetCallback) => {
+        this.log.debug(`Fan ${this.name} get speed: ${this.rotationSpeed}`);
+        cb(HAPStatus.SUCCESS, this.rotationSpeed);
+      })
+      .on(CharacteristicEventTypes.SET, (value: CharacteristicValue, cb: CharacteristicSetCallback) => {
+        this.rotationSpeed = value as number;
+        this.active = this.rotationSpeed > 0;
+        this.log.debug(`Fan ${this.name} set speed: ${this.rotationSpeed}`);
+        this.controller.sendLoadDim(this.vid, this.rotationSpeed);
+        // Keep Active characteristic in sync
+        this.fanService
+          .getCharacteristic(this.hap.Characteristic.Active)
+          .updateValue(this.active ? 1 : 0);
+        cb();
       });
   }
 
-  loadStatusChange(value: number) {
-    this.log.debug(`Fan loadStatusChange (VID=${this.vid}, Name=${this.name}, Bri=${value}`);
-    this.fanOn = (value > 0);
+  loadStatusChange(value: number): void {
+    this.log.debug(`Fan ${this.name} status change: ${value}`);
+    this.rotationSpeed = value;
+    this.active = value > 0;
 
-    this.fanService.getCharacteristic(this.hap.Characteristic.On).updateValue(this.fanOn);
-
+    this.fanService.getCharacteristic(this.hap.Characteristic.Active).updateValue(this.active ? 1 : 0);
+    this.fanService.getCharacteristic(this.hap.Characteristic.RotationSpeed).updateValue(this.rotationSpeed);
   }
-
 
   identify(): void {
-    this.log.info("Identify!");
+    this.log.info(`Identify fan: ${this.name} (VID ${this.vid})`);
   }
-
 
   getServices(): Service[] {
-    return [
-      this.informationService,
-      this.fanService,
-    ];
+    return [this.informationService, this.fanService];
   }
-
 }

@@ -11,18 +11,18 @@ import {
 } from "homebridge";
 
 import { VantageInfusionController } from "./vantage-infusion-controller";
-import { VantageLoadObjectInterface} from "./vantage-light-accessory";
+import { VantageLoadObjectInterface } from "./vantage-light-accessory";
 
 export class VantageOutlet implements AccessoryPlugin, VantageLoadObjectInterface {
 
   private readonly log: Logging;
-  private hap: HAP;
-
-  private vid: string;
-  private controller: VantageInfusionController;
-  private outletOn = false;
+  private readonly hap: HAP;
+  private readonly vid: string;
+  private readonly controller: VantageInfusionController;
 
   name: string;
+
+  private outletOn = false;
 
   private readonly outletService: Service;
   private readonly informationService: Service;
@@ -35,49 +35,50 @@ export class VantageOutlet implements AccessoryPlugin, VantageLoadObjectInterfac
     this.controller = controller;
 
     this.outletService = new hap.Service.Outlet(name);
-    this.addOutletService();
+    this.buildOutletService();
 
     this.informationService = new hap.Service.AccessoryInformation()
       .setCharacteristic(hap.Characteristic.Manufacturer, "Vantage Controls")
-      .setCharacteristic(hap.Characteristic.Model, "Power Switch Outlet")
+      .setCharacteristic(hap.Characteristic.Model, "InFusion Outlet")
       .setCharacteristic(hap.Characteristic.SerialNumber, `VID ${this.vid}`);
 
-    // get the current state
     this.controller.sendGetLoadStatus(this.vid);
   }
 
-  addOutletService() {
-    this.outletService.getCharacteristic(this.hap.Characteristic.On)
-      .on(CharacteristicEventTypes.GET, (callback: CharacteristicGetCallback) => {
-        this.log.debug(`outlet ${this.name} get state: ${this.outletOn ? "ON" : "OFF"}`);
-        callback(HAPStatus.SUCCESS, this.outletOn);
+  private buildOutletService(): void {
+    this.outletService
+      .getCharacteristic(this.hap.Characteristic.On)
+      .on(CharacteristicEventTypes.GET, (cb: CharacteristicGetCallback) => {
+        this.log.debug(`Outlet ${this.name} get state: ${this.outletOn}`);
+        cb(HAPStatus.SUCCESS, this.outletOn);
       })
-      .on(CharacteristicEventTypes.SET, (value: CharacteristicValue, callback: CharacteristicSetCallback) => {
-        this.log.debug(`outlet ${this.name} set state: ${value ? "ON" : "OFF"}`);
+      .on(CharacteristicEventTypes.SET, (value: CharacteristicValue, cb: CharacteristicSetCallback) => {
         this.outletOn = value as boolean;
+        this.log.debug(`Outlet ${this.name} set state: ${this.outletOn}`);
         this.controller.sendLoadDim(this.vid, this.outletOn ? 100 : 0);
-        callback();
+        cb();
+      });
+
+    // OutletInUse is required by HAP; report it as always in-use when on
+    this.outletService
+      .getCharacteristic(this.hap.Characteristic.OutletInUse)
+      .on(CharacteristicEventTypes.GET, (cb: CharacteristicGetCallback) => {
+        cb(HAPStatus.SUCCESS, this.outletOn);
       });
   }
 
-
-  loadStatusChange(value: number) {
-    this.log.debug(`outlet loadStatusChange (VID=${this.vid}, Name=${this.name}, Bri=${value}`);
-    this.outletOn = (value > 0);
-
+  loadStatusChange(value: number): void {
+    this.log.debug(`Outlet ${this.name} status change: ${value}`);
+    this.outletOn = value > 0;
     this.outletService.getCharacteristic(this.hap.Characteristic.On).updateValue(this.outletOn);
-
+    this.outletService.getCharacteristic(this.hap.Characteristic.OutletInUse).updateValue(this.outletOn);
   }
 
   identify(): void {
-    this.log.info("Identify!");
+    this.log.info(`Identify outlet: ${this.name} (VID ${this.vid})`);
   }
 
   getServices(): Service[] {
-    return [
-      this.informationService,
-      this.outletService,
-    ];
+    return [this.informationService, this.outletService];
   }
-
 }

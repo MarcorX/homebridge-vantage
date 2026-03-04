@@ -8,167 +8,132 @@ import {
   Service,
   CharacteristicEventTypes,
   HAPStatus,
-  HapStatusError,
 } from "homebridge";
 
 import { VantageInfusionController } from "./vantage-infusion-controller";
-import { VantageLoadObjectInterface} from "./vantage-light-accessory";
+import { VantageLoadObjectInterface } from "./vantage-light-accessory";
 
+export type DimmerLoadType = "dimmer" | "rgb";
+
+/** Dimmable (and optionally RGB) light. */
 export class VantageDimmer implements AccessoryPlugin, VantageLoadObjectInterface {
 
   private readonly log: Logging;
-  private hap: HAP;
-
-  private vid: string;
-  private controller: VantageInfusionController;
-  private lightOn = false;
-  private brightness: number;
-  private saturation: number;
-  private hue: number;
-  private loadType: string;
-  private dimmerRequestTimer: any;
+  private readonly hap: HAP;
+  private readonly vid: string;
+  private readonly controller: VantageInfusionController;
+  private readonly loadType: DimmerLoadType;
 
   name: string;
+
+  private lightOn = false;
+  private brightness = 100; // 0–100
+  private hue = 0;
+  private saturation = 0;
 
   private readonly lightService: Service;
   private readonly informationService: Service;
 
-  // TODO: dont need loadType, but because of rgb it is kept.
-  constructor(hap: HAP, log: Logging, name: string, vid: string, controller: VantageInfusionController, loadType: string) {
+  constructor(
+    hap: HAP,
+    log: Logging,
+    name: string,
+    vid: string,
+    controller: VantageInfusionController,
+    loadType: DimmerLoadType = "dimmer"
+  ) {
     this.log = log;
     this.hap = hap;
     this.name = name;
     this.vid = vid;
     this.controller = controller;
-    this.brightness = 100;
-    this.saturation = 0;
-    this.hue = 0;
     this.loadType = loadType;
-    this.dimmerRequestTimer = undefined;
 
     this.lightService = new hap.Service.Lightbulb(name);
-    this.addLightService();
+    this.buildLightService();
 
     this.informationService = new hap.Service.AccessoryInformation()
       .setCharacteristic(hap.Characteristic.Manufacturer, "Vantage Controls")
-      .setCharacteristic(hap.Characteristic.Model, "Power Switch Dimmer")
+      .setCharacteristic(hap.Characteristic.Model, "InFusion Dimmer")
       .setCharacteristic(hap.Characteristic.SerialNumber, `VID ${this.vid}`);
 
-    // get the current state
     this.controller.sendGetLoadStatus(this.vid);
   }
 
-  addLightService() {
-    this.lightService.getCharacteristic(this.hap.Characteristic.On)
-      .on(CharacteristicEventTypes.GET, (callback: CharacteristicGetCallback) => {
-        this.log.debug(`Dimmer ${this.name} get state: ${this.lightOn ? "ON" : "OFF"}`);
-        callback(HAPStatus.SUCCESS, this.lightOn);
+  private buildLightService(): void {
+    const { Characteristic } = this.hap;
+
+    // On/Off
+    this.lightService
+      .getCharacteristic(Characteristic.On)
+      .on(CharacteristicEventTypes.GET, (cb: CharacteristicGetCallback) => {
+        this.log.debug(`Dimmer ${this.name} get on: ${this.lightOn}`);
+        cb(HAPStatus.SUCCESS, this.lightOn);
       })
-      .on(CharacteristicEventTypes.SET, (value: CharacteristicValue, callback: CharacteristicSetCallback) => {
-        this.log.debug(`Dimmer ${this.name} set state: ${value ? "ON" : "OFF"}`);
+      .on(CharacteristicEventTypes.SET, (value: CharacteristicValue, cb: CharacteristicSetCallback) => {
         this.lightOn = value as boolean;
-        this.dispatchOnOffRequest();
-        callback();
+        this.log.debug(`Dimmer ${this.name} set on: ${this.lightOn}`);
+        this.controller.sendLoadDim(this.vid, this.lightOn ? this.brightness : 0, 2.5);
+        cb();
       });
 
-    if (this.loadType == "dimmer" || this.loadType == "rgb") {
-      this.addDimmerLightService();
-    }
-
-    if (this.loadType == "rgb") {
-      this.addRGBLightService();
-    }
-  }
-
-  dispatchOnOffRequest() {
-    this.controller.sendLoadDim(this.vid, this.lightOn ? this.brightness : 0, 2.5);
-  }
-
-  dispatchDimmerRequest() {
-    // this.dimmerRequestTimer = setTimeout(() => {
-      this.controller.sendLoadDim(this.vid, this.lightOn ? this.brightness : 0);
-      this.dimmerRequestTimer = undefined;
-    // }, 50);
-  }
-
-  /*
-   * adds dimmer control to light service
-   */
-  addDimmerLightService() {
-    this.lightService.getCharacteristic(this.hap.Characteristic.Brightness)
-      .on(CharacteristicEventTypes.GET, (callback: CharacteristicGetCallback) => {
-        this.log.debug(`Dimmer ${this.name} get brightness state: ${this.brightness}`);
-        callback(HAPStatus.SUCCESS, this.brightness);
+    // Brightness (dimmer & rgb)
+    this.lightService
+      .getCharacteristic(Characteristic.Brightness)
+      .on(CharacteristicEventTypes.GET, (cb: CharacteristicGetCallback) => {
+        this.log.debug(`Dimmer ${this.name} get brightness: ${this.brightness}`);
+        cb(HAPStatus.SUCCESS, this.brightness);
       })
-      .on(CharacteristicEventTypes.SET, (value: CharacteristicValue, callback: CharacteristicSetCallback) => {
-        this.log.debug(`Dimmer ${this.name} set brightness state: ${value}`);
+      .on(CharacteristicEventTypes.SET, (value: CharacteristicValue, cb: CharacteristicSetCallback) => {
         this.brightness = value as number;
         this.lightOn = this.brightness > 0;
-
-        // a simple debouncing mechanism
-        // if (this.dimmerRequestTimer == undefined) {
-          this.dispatchDimmerRequest();
-
-        // } else {
-        //   clearTimeout(this.dimmerRequestTimer);
-        //   this.dispatchDimmerRequest();
-        // }
-
-        callback();
-      });
-  }
-
-  /*
-   * adds RGB control to light service
-   * NOTE: this was not checked! Probably doesnt work
-   */
-  addRGBLightService() {
-    this.lightService.getCharacteristic(this.hap.Characteristic.Saturation)
-      .on(CharacteristicEventTypes.GET, (callback: CharacteristicGetCallback) => {
-        callback(HAPStatus.SUCCESS, this.saturation);
-      })
-      .on(CharacteristicEventTypes.SET, (value: CharacteristicValue, callback: CharacteristicSetCallback) => {
-        this.lightOn = true;
-        this.saturation = value as number;
-        this.controller.sendRGBLoadDissolveHSL(this.vid, this.hue, this.saturation, this.brightness);
-        callback();
+        this.log.debug(`Dimmer ${this.name} set brightness: ${this.brightness}`);
+        this.controller.sendLoadDim(this.vid, this.brightness);
+        cb();
       });
 
-    this.lightService.getCharacteristic(this.hap.Characteristic.Hue)
-      .on(CharacteristicEventTypes.GET, (callback: CharacteristicGetCallback) => {
-        callback(HAPStatus.SUCCESS, this.hue);
-      })
-      .on(CharacteristicEventTypes.SET, (value: CharacteristicValue, callback: CharacteristicSetCallback) => {
-        this.lightOn = true;
-        this.hue = value as number;
-        this.controller.sendRGBLoadDissolveHSL(this.vid, this.hue, this.saturation, this.brightness);
-        callback();
-      });
-  }
+    // Hue & Saturation (rgb only)
+    if (this.loadType === "rgb") {
+      this.lightService
+        .getCharacteristic(Characteristic.Hue)
+        .on(CharacteristicEventTypes.GET, (cb: CharacteristicGetCallback) => {
+          cb(HAPStatus.SUCCESS, this.hue);
+        })
+        .on(CharacteristicEventTypes.SET, (value: CharacteristicValue, cb: CharacteristicSetCallback) => {
+          this.hue = value as number;
+          this.lightOn = true;
+          this.controller.sendRGBLoadDissolveHSL(this.vid, this.hue, this.saturation, this.brightness);
+          cb();
+        });
 
-
-  loadStatusChange(value: number) {
-    this.log.debug(`Dimmer loadStatusChange (VID=${this.vid}, Name=${this.name}, Bri=${value}`);
-    this.brightness = value;
-    this.lightOn = (this.brightness > 0);
-
-    this.lightService.getCharacteristic(this.hap.Characteristic.On).updateValue(this.lightOn);
-
-    if (this.loadType == "rgb" || this.loadType == "dimmer") {
-      this.lightService.getCharacteristic(this.hap.Characteristic.Brightness).updateValue(this.brightness);
+      this.lightService
+        .getCharacteristic(Characteristic.Saturation)
+        .on(CharacteristicEventTypes.GET, (cb: CharacteristicGetCallback) => {
+          cb(HAPStatus.SUCCESS, this.saturation);
+        })
+        .on(CharacteristicEventTypes.SET, (value: CharacteristicValue, cb: CharacteristicSetCallback) => {
+          this.saturation = value as number;
+          this.lightOn = true;
+          this.controller.sendRGBLoadDissolveHSL(this.vid, this.hue, this.saturation, this.brightness);
+          cb();
+        });
     }
   }
 
+  loadStatusChange(value: number): void {
+    this.log.debug(`Dimmer ${this.name} status change: ${value}`);
+    this.brightness = value;
+    this.lightOn = value > 0;
+
+    this.lightService.getCharacteristic(this.hap.Characteristic.On).updateValue(this.lightOn);
+    this.lightService.getCharacteristic(this.hap.Characteristic.Brightness).updateValue(this.brightness);
+  }
 
   identify(): void {
-    this.log.info("Identify!");
+    this.log.info(`Identify dimmer: ${this.name} (VID ${this.vid})`);
   }
 
   getServices(): Service[] {
-    return [
-      this.informationService,
-      this.lightService,
-    ];
+    return [this.informationService, this.lightService];
   }
-
 }

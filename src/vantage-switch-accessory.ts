@@ -11,18 +11,18 @@ import {
 } from "homebridge";
 
 import { VantageInfusionController } from "./vantage-infusion-controller";
-import { VantageLoadObjectInterface} from "./vantage-light-accessory";
+import { VantageLoadObjectInterface } from "./vantage-light-accessory";
 
 export class VantageSwitch implements AccessoryPlugin, VantageLoadObjectInterface {
 
   private readonly log: Logging;
-  private hap: HAP;
-
-  private vid: string;
-  private controller: VantageInfusionController;
-  private switchOn = false;
+  private readonly hap: HAP;
+  private readonly vid: string;
+  private readonly controller: VantageInfusionController;
 
   name: string;
+
+  private switchOn = false;
 
   private readonly switchService: Service;
   private readonly informationService: Service;
@@ -35,51 +35,42 @@ export class VantageSwitch implements AccessoryPlugin, VantageLoadObjectInterfac
     this.controller = controller;
 
     this.switchService = new hap.Service.Switch(name);
-    this.addSwitchService();
+    this.buildSwitchService();
 
     this.informationService = new hap.Service.AccessoryInformation()
       .setCharacteristic(hap.Characteristic.Manufacturer, "Vantage Controls")
-      .setCharacteristic(hap.Characteristic.Model, "Power Switch Switch")
+      .setCharacteristic(hap.Characteristic.Model, "InFusion Switch")
       .setCharacteristic(hap.Characteristic.SerialNumber, `VID ${this.vid}`);
 
-    // get the current state
     this.controller.sendGetLoadStatus(this.vid);
   }
 
-  addSwitchService() {
-    this.switchService.getCharacteristic(this.hap.Characteristic.On)
-      .on(CharacteristicEventTypes.GET, (callback: CharacteristicGetCallback) => {
-        this.log.debug(`switch ${this.name} get state: ${this.switchOn ? "ON" : "OFF"}`);
-        callback(HAPStatus.SUCCESS, this.switchOn);
+  private buildSwitchService(): void {
+    this.switchService
+      .getCharacteristic(this.hap.Characteristic.On)
+      .on(CharacteristicEventTypes.GET, (cb: CharacteristicGetCallback) => {
+        this.log.debug(`Switch ${this.name} get state: ${this.switchOn}`);
+        cb(HAPStatus.SUCCESS, this.switchOn);
       })
-      .on(CharacteristicEventTypes.SET, (value: CharacteristicValue, callback: CharacteristicSetCallback) => {
-        this.log.debug(`switch ${this.name} set state: ${value ? "ON" : "OFF"}`);
+      .on(CharacteristicEventTypes.SET, (value: CharacteristicValue, cb: CharacteristicSetCallback) => {
         this.switchOn = value as boolean;
+        this.log.debug(`Switch ${this.name} set state: ${this.switchOn}`);
         this.controller.sendLoadDim(this.vid, this.switchOn ? 100 : 0);
-        callback();
+        cb();
       });
   }
 
-
-  loadStatusChange(value: number) {
-    this.log.debug(`switch loadStatusChange (VID=${this.vid}, Name=${this.name}, Bri=${value}`);
-    this.switchOn = (value > 0);
-
+  loadStatusChange(value: number): void {
+    this.log.debug(`Switch ${this.name} status change: ${value}`);
+    this.switchOn = value > 0;
     this.switchService.getCharacteristic(this.hap.Characteristic.On).updateValue(this.switchOn);
-
   }
-
 
   identify(): void {
-    this.log.info("Identify!");
+    this.log.info(`Identify switch: ${this.name} (VID ${this.vid})`);
   }
 
-  
   getServices(): Service[] {
-    return [
-      this.informationService,
-      this.switchService,
-    ];
+    return [this.informationService, this.switchService];
   }
-
 }
