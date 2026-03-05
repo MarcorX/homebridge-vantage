@@ -144,11 +144,9 @@ export class VantageBlind implements AccessoryPlugin {
 
   blindPositionChange(position: number): void {
     this.log.debug(`Blind ${this.name} position change from controller: ${position}`);
-    // Physical operation detected — cancel any pending timer and sync state
-    if (this.moveTimer) {
-      clearTimeout(this.moveTimer);
-      this.moveTimer = null;
-    }
+    // If a timed move is in progress, ignore InFusion status echoes —
+    // Somfy RT has no real feedback so InFusion just echoes 0/100 immediately.
+    if (this.moveTimer) return;
     this.currentPosition = position;
     this.targetPosition = position;
     this.positionState = 2;
