@@ -123,7 +123,10 @@ class VantageStaticPlatform implements StaticPlatformPlugin {
   private onEndDownloadConfiguration(configurationString: string): void {
     this.log.info("Configuration download complete — building accessory list.");
 
-    const configuration = xmlParser.parse(configurationString);
+    // The Vantage DC file contains non-standard processing instructions (e.g. <?File /...?>)
+    // with embedded scene program code that crash fast-xml-parser. Strip them before parsing.
+    const cleanedConfig = configurationString.replace(/<\?(?!xml[\s?>])[\s\S]*?\?>/g, '');
+    const configuration = xmlParser.parse(cleanedConfig);
 
     // Normalise to always be an array (xml2json returns a plain object for single-item lists)
     const objects: any[] = configuration.Project?.Objects?.Object ?? [];
