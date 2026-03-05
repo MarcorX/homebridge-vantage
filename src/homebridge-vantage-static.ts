@@ -165,7 +165,7 @@ class VantageStaticPlatform implements StaticPlatformPlugin {
       this.addHVACItem(item);
     } else if (item.ObjectType === "Load") {
       this.addLoadItem(item, areaName);
-    } else if (item.ObjectType === "Blind" || item.ObjectType === "BlindGroup") {
+    } else if (item.ObjectType === "Blind") {
       this.addBlindItem(item);
     } else {
       this.log.debug(`Skipping unsupported object type: ${item.ObjectType} (VID=${item.VID})`);

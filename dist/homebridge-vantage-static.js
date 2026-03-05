@@ -96,7 +96,7 @@ class VantageStaticPlatform {
         else if (item.ObjectType === "Load") {
             this.addLoadItem(item, areaName);
         }
-        else if (item.ObjectType === "Blind" || item.ObjectType === "BlindGroup") {
+        else if (item.ObjectType === "Blind") {
             this.addBlindItem(item);
         }
         else {
