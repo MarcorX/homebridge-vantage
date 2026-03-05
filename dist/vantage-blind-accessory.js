@@ -50,6 +50,11 @@ class VantageBlind {
             .on("get" /* CharacteristicEventTypes.GET */, (cb) => {
             cb(0 /* HAPStatus.SUCCESS */, this.positionState);
         });
+        this.windowCoveringService
+            .addCharacteristic(Characteristic.ObstructionDetected)
+            .on("get" /* CharacteristicEventTypes.GET */, (cb) => {
+            cb(0 /* HAPStatus.SUCCESS */, false);
+        });
     }
     moveTo(target) {
         if (target === this.currentPosition)

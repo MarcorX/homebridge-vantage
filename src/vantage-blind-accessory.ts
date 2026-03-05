@@ -81,6 +81,12 @@ export class VantageBlind implements AccessoryPlugin {
       .on(CharacteristicEventTypes.GET, (cb: CharacteristicGetCallback) => {
         cb(HAPStatus.SUCCESS, this.positionState);
       });
+
+    this.windowCoveringService
+      .addCharacteristic(Characteristic.ObstructionDetected)
+      .on(CharacteristicEventTypes.GET, (cb: CharacteristicGetCallback) => {
+        cb(HAPStatus.SUCCESS, false);
+      });
   }
 
   private moveTo(target: number): void {
