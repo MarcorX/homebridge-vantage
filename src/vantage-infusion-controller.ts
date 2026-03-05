@@ -66,6 +66,7 @@ export class VantageInfusionController extends EventEmitter {
 
   constructor(log: Logging, ipaddress: string, commandIntervalMs = 50, forceRefresh = false) {
     super();
+    this.setMaxListeners(100);
     this.log = log;
     this.ipaddress = ipaddress;
     // Support legacy controllerSendInterval (microseconds): if > 1000 assume µs and convert

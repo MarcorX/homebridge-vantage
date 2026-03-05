@@ -71,6 +71,7 @@ class VantageInfusionController extends events_1.EventEmitter {
         this.controllerReconnectDelay = INITIAL_RECONNECT_DELAY_MS;
         this.controllerReconnectTimer = null;
         this.configurationDownloadComplete = false;
+        this.setMaxListeners(100);
         this.log = log;
         this.ipaddress = ipaddress;
         // Support legacy controllerSendInterval (microseconds): if > 1000 assume µs and convert

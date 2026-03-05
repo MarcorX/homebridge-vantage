@@ -18,23 +18,27 @@ export class VantageBlind implements AccessoryPlugin {
   private readonly hap: HAP;
   private readonly vid: string;
   private readonly controller: VantageInfusionController;
+  private readonly travelTime: number; // seconds for full 0→100 travel
 
   name: string;
 
-  // HomeKit: 0 = closed, 100 = fully open (matches Vantage)
+  // HomeKit: 0 = closed, 100 = fully open
   private currentPosition = 0;
   private targetPosition = 0;
-  private positionState = 2; // 2 = STOPPED
+  private positionState = 2; // 0=DECREASING, 1=INCREASING, 2=STOPPED
+
+  private moveTimer: NodeJS.Timeout | null = null;
 
   private readonly windowCoveringService: Service;
   private readonly informationService: Service;
 
-  constructor(hap: HAP, log: Logging, name: string, vid: string, controller: VantageInfusionController) {
+  constructor(hap: HAP, log: Logging, name: string, vid: string, controller: VantageInfusionController, travelTime = 25) {
     this.log = log;
     this.hap = hap;
     this.name = name;
     this.vid = vid;
     this.controller = controller;
+    this.travelTime = travelTime;
 
     this.windowCoveringService = new hap.Service.WindowCovering(name);
     this.buildWindowCoveringService();
@@ -66,16 +70,9 @@ export class VantageBlind implements AccessoryPlugin {
         cb(HAPStatus.SUCCESS, this.targetPosition);
       })
       .on(CharacteristicEventTypes.SET, (value: CharacteristicValue, cb: CharacteristicSetCallback) => {
-        this.targetPosition = value as number;
-        this.log.debug(`Blind ${this.name} set position: ${this.targetPosition}`);
-
-        if (this.targetPosition === 100) {
-          this.controller.sendBlindOpen(this.vid);
-        } else if (this.targetPosition === 0) {
-          this.controller.sendBlindClose(this.vid);
-        } else {
-          this.controller.sendBlindSetPosition(this.vid, this.targetPosition);
-        }
+        const target = value as number;
+        this.log.debug(`Blind ${this.name} set position: ${target} (current: ${this.currentPosition})`);
+        this.moveTo(target);
         cb();
       });
 
@@ -86,12 +83,54 @@ export class VantageBlind implements AccessoryPlugin {
       });
   }
 
-  blindPositionChange(position: number): void {
-    this.log.debug(`Blind ${this.name} position change: ${position}`);
-    this.currentPosition = position;
-    this.targetPosition = position;
-    this.positionState = 2; // STOPPED
+  private moveTo(target: number): void {
+    if (target === this.currentPosition) return;
 
+    // Cancel any in-progress move
+    if (this.moveTimer) {
+      clearTimeout(this.moveTimer);
+      this.moveTimer = null;
+    }
+
+    const delta = Math.abs(target - this.currentPosition);
+    const durationMs = (delta / 100) * this.travelTime * 1000;
+    const opening = target > this.currentPosition;
+
+    this.targetPosition = target;
+    this.positionState = opening ? 1 : 0; // 1=INCREASING, 0=DECREASING
+
+    this.updateCharacteristics();
+
+    if (opening) {
+      this.controller.sendBlindOpen(this.vid);
+    } else {
+      this.controller.sendBlindClose(this.vid);
+    }
+
+    // For fully open/close, no stop needed — motor handles it
+    if (target === 100 || target === 0) {
+      this.log.debug(`Blind ${this.name} moving to ${target}% (full travel, no stop needed)`);
+      this.moveTimer = setTimeout(() => {
+        this.moveTimer = null;
+        this.currentPosition = target;
+        this.positionState = 2;
+        this.updateCharacteristics();
+      }, durationMs + 1000); // +1s buffer for full travel
+      return;
+    }
+
+    this.log.debug(`Blind ${this.name} moving to ${target}% — stopping in ${(durationMs / 1000).toFixed(1)}s`);
+
+    this.moveTimer = setTimeout(() => {
+      this.moveTimer = null;
+      this.controller.sendBlindStop(this.vid);
+      this.currentPosition = target;
+      this.positionState = 2;
+      this.updateCharacteristics();
+    }, durationMs);
+  }
+
+  private updateCharacteristics(): void {
     this.windowCoveringService
       .getCharacteristic(this.hap.Characteristic.CurrentPosition)
       .updateValue(this.currentPosition);
@@ -101,6 +140,19 @@ export class VantageBlind implements AccessoryPlugin {
     this.windowCoveringService
       .getCharacteristic(this.hap.Characteristic.PositionState)
       .updateValue(this.positionState);
+  }
+
+  blindPositionChange(position: number): void {
+    this.log.debug(`Blind ${this.name} position change from controller: ${position}`);
+    // Physical operation detected — cancel any pending timer and sync state
+    if (this.moveTimer) {
+      clearTimeout(this.moveTimer);
+      this.moveTimer = null;
+    }
+    this.currentPosition = position;
+    this.targetPosition = position;
+    this.positionState = 2;
+    this.updateCharacteristics();
   }
 
   identify(): void {

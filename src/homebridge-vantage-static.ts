@@ -66,6 +66,7 @@ class VantageStaticPlatform implements StaticPlatformPlugin {
   private readonly vidMapping: Record<string, VidMappingEntry>;
   private readonly whitelist: string[];
   private readonly fahrenheit: boolean;
+  private readonly blindTravelTime: number;
 
   private readonly accessoriesDict: Record<string, AccessoryPlugin> = {};
   private readonly interfaceSupportRequests: Array<Promise<void>> = [];
@@ -73,9 +74,10 @@ class VantageStaticPlatform implements StaticPlatformPlugin {
 
   constructor(log: Logging, config: PlatformConfig, api: API) {
     this.log = log;
-    this.vidMapping  = config.vidMapping  ?? {};
-    this.whitelist   = config.whitelist   ?? [];
-    this.fahrenheit  = config.fahrenheit  ?? true;
+    this.vidMapping      = config.vidMapping      ?? {};
+    this.whitelist       = config.whitelist       ?? [];
+    this.fahrenheit      = config.fahrenheit      ?? true;
+    this.blindTravelTime = config.blindTravelTime ?? 25;
 
     // Support legacy controllerSendInterval (µs) and new commandIntervalMs (ms)
     const intervalMs: number = config.commandIntervalMs
@@ -237,7 +239,7 @@ class VantageStaticPlatform implements StaticPlatformPlugin {
         const name = this.resolveVidName(resolvedItem.VID) || resolvedItem.Name;
         this.log.info(`Added blind: ${name} (VID=${resolvedItem.VID}, type=${resolvedItem.ObjectType})`);
         this.accessoriesDict[resolvedItem.VID] = new VantageBlind(
-          hap, this.log, name, resolvedItem.VID, this.vantageController
+          hap, this.log, name, resolvedItem.VID, this.vantageController, this.blindTravelTime
         );
       });
 

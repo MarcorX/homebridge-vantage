@@ -3,16 +3,18 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.VantageBlind = void 0;
 const vantage_infusion_controller_1 = require("./vantage-infusion-controller");
 class VantageBlind {
-    constructor(hap, log, name, vid, controller) {
-        // HomeKit: 0 = closed, 100 = fully open (matches Vantage)
+    constructor(hap, log, name, vid, controller, travelTime = 25) {
+        // HomeKit: 0 = closed, 100 = fully open
         this.currentPosition = 0;
         this.targetPosition = 0;
-        this.positionState = 2; // 2 = STOPPED
+        this.positionState = 2; // 0=DECREASING, 1=INCREASING, 2=STOPPED
+        this.moveTimer = null;
         this.log = log;
         this.hap = hap;
         this.name = name;
         this.vid = vid;
         this.controller = controller;
+        this.travelTime = travelTime;
         this.windowCoveringService = new hap.Service.WindowCovering(name);
         this.buildWindowCoveringService();
         this.informationService = new hap.Service.AccessoryInformation()
@@ -38,17 +40,9 @@ class VantageBlind {
             cb(0 /* HAPStatus.SUCCESS */, this.targetPosition);
         })
             .on("set" /* CharacteristicEventTypes.SET */, (value, cb) => {
-            this.targetPosition = value;
-            this.log.debug(`Blind ${this.name} set position: ${this.targetPosition}`);
-            if (this.targetPosition === 100) {
-                this.controller.sendBlindOpen(this.vid);
-            }
-            else if (this.targetPosition === 0) {
-                this.controller.sendBlindClose(this.vid);
-            }
-            else {
-                this.controller.sendBlindSetPosition(this.vid, this.targetPosition);
-            }
+            const target = value;
+            this.log.debug(`Blind ${this.name} set position: ${target} (current: ${this.currentPosition})`);
+            this.moveTo(target);
             cb();
         });
         this.windowCoveringService
@@ -57,11 +51,47 @@ class VantageBlind {
             cb(0 /* HAPStatus.SUCCESS */, this.positionState);
         });
     }
-    blindPositionChange(position) {
-        this.log.debug(`Blind ${this.name} position change: ${position}`);
-        this.currentPosition = position;
-        this.targetPosition = position;
-        this.positionState = 2; // STOPPED
+    moveTo(target) {
+        if (target === this.currentPosition)
+            return;
+        // Cancel any in-progress move
+        if (this.moveTimer) {
+            clearTimeout(this.moveTimer);
+            this.moveTimer = null;
+        }
+        const delta = Math.abs(target - this.currentPosition);
+        const durationMs = (delta / 100) * this.travelTime * 1000;
+        const opening = target > this.currentPosition;
+        this.targetPosition = target;
+        this.positionState = opening ? 1 : 0; // 1=INCREASING, 0=DECREASING
+        this.updateCharacteristics();
+        if (opening) {
+            this.controller.sendBlindOpen(this.vid);
+        }
+        else {
+            this.controller.sendBlindClose(this.vid);
+        }
+        // For fully open/close, no stop needed — motor handles it
+        if (target === 100 || target === 0) {
+            this.log.debug(`Blind ${this.name} moving to ${target}% (full travel, no stop needed)`);
+            this.moveTimer = setTimeout(() => {
+                this.moveTimer = null;
+                this.currentPosition = target;
+                this.positionState = 2;
+                this.updateCharacteristics();
+            }, durationMs + 1000); // +1s buffer for full travel
+            return;
+        }
+        this.log.debug(`Blind ${this.name} moving to ${target}% — stopping in ${(durationMs / 1000).toFixed(1)}s`);
+        this.moveTimer = setTimeout(() => {
+            this.moveTimer = null;
+            this.controller.sendBlindStop(this.vid);
+            this.currentPosition = target;
+            this.positionState = 2;
+            this.updateCharacteristics();
+        }, durationMs);
+    }
+    updateCharacteristics() {
         this.windowCoveringService
             .getCharacteristic(this.hap.Characteristic.CurrentPosition)
             .updateValue(this.currentPosition);
@@ -71,6 +101,18 @@ class VantageBlind {
         this.windowCoveringService
             .getCharacteristic(this.hap.Characteristic.PositionState)
             .updateValue(this.positionState);
+    }
+    blindPositionChange(position) {
+        this.log.debug(`Blind ${this.name} position change from controller: ${position}`);
+        // Physical operation detected — cancel any pending timer and sync state
+        if (this.moveTimer) {
+            clearTimeout(this.moveTimer);
+            this.moveTimer = null;
+        }
+        this.currentPosition = position;
+        this.targetPosition = position;
+        this.positionState = 2;
+        this.updateCharacteristics();
     }
     identify() {
         this.log.info(`Identify blind: ${this.name} (VID ${this.vid})`);

@@ -20,7 +20,7 @@ const PLATFORM_NAME = "VantageInfusion";
 let hap;
 class VantageStaticPlatform {
     constructor(log, config, api) {
-        var _a, _b, _c, _d, _e;
+        var _a, _b, _c, _d, _e, _f;
         this.accessoriesDict = {};
         this.interfaceSupportRequests = [];
         this.accessoriesCallback = () => { };
@@ -28,11 +28,12 @@ class VantageStaticPlatform {
         this.vidMapping = (_a = config.vidMapping) !== null && _a !== void 0 ? _a : {};
         this.whitelist = (_b = config.whitelist) !== null && _b !== void 0 ? _b : [];
         this.fahrenheit = (_c = config.fahrenheit) !== null && _c !== void 0 ? _c : true;
+        this.blindTravelTime = (_d = config.blindTravelTime) !== null && _d !== void 0 ? _d : 25;
         // Support legacy controllerSendInterval (µs) and new commandIntervalMs (ms)
-        const intervalMs = (_d = config.commandIntervalMs) !== null && _d !== void 0 ? _d : (config.controllerSendInterval != null
+        const intervalMs = (_e = config.commandIntervalMs) !== null && _e !== void 0 ? _e : (config.controllerSendInterval != null
             ? Math.round(config.controllerSendInterval / 1000)
             : 50);
-        this.vantageController = new vantage_infusion_controller_1.VantageInfusionController(this.log, config.ipaddress, intervalMs, (_e = config.forceRefresh) !== null && _e !== void 0 ? _e : false);
+        this.vantageController = new vantage_infusion_controller_1.VantageInfusionController(this.log, config.ipaddress, intervalMs, (_f = config.forceRefresh) !== null && _f !== void 0 ? _f : false);
         this.vantageController.on(vantage_infusion_controller_1.EndDownloadConfigurationEvent, this.onEndDownloadConfiguration.bind(this));
         this.vantageController.on(vantage_infusion_controller_1.LoadStatusChangeEvent, this.onLoadStatusChange.bind(this));
         this.vantageController.on(vantage_infusion_controller_1.ThermostatIndoorTemperatureChangeEvent, this.onThermostatTemperature.bind(this));
@@ -161,7 +162,7 @@ class VantageStaticPlatform {
                 return;
             const name = this.resolveVidName(resolvedItem.VID) || resolvedItem.Name;
             this.log.info(`Added blind: ${name} (VID=${resolvedItem.VID}, type=${resolvedItem.ObjectType})`);
-            this.accessoriesDict[resolvedItem.VID] = new vantage_blind_accessory_1.VantageBlind(hap, this.log, name, resolvedItem.VID, this.vantageController);
+            this.accessoriesDict[resolvedItem.VID] = new vantage_blind_accessory_1.VantageBlind(hap, this.log, name, resolvedItem.VID, this.vantageController, this.blindTravelTime);
         });
         this.interfaceSupportRequests.push(promise);
     }
