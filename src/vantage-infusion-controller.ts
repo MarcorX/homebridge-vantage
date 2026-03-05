@@ -391,10 +391,10 @@ export class VantageInfusionController extends EventEmitter {
     if (this.interfaces[interfaceName] === undefined) {
       return Promise.resolve({ item, interface: interfaceName, support: false });
     }
-    const interfaceId = this.interfaces[interfaceName];
+    const interfaceId = String(this.interfaces[interfaceName]);
     return new Promise((resolve) => {
       this.once(
-        IsInterfaceSupportedEvent(item.VID.trim(), interfaceId.trim()),
+        IsInterfaceSupportedEvent(String(item.VID).trim(), interfaceId.trim()),
         (support) => resolve({ item, interface: interfaceName, support: Boolean(support) })
       );
       this.sendIsInterfaceSupported(item.VID, interfaceId);
