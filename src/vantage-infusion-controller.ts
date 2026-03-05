@@ -36,6 +36,7 @@ export const ThermostatHeatSetpointChangeEvent = "thermostatHeatSetpointChange";
 export const ThermostatCoolSetpointChangeEvent = "thermostatCoolSetpointChange";
 export const ThermostatModeChangeEvent = "thermostatModeChange";
 export const ThermostatHVACStateChangeEvent = "thermostatHVACStateChange";
+export const BlindPositionChangeEvent = "blindPositionChange";
 export const EndDownloadConfigurationEvent = "endDownloadConfiguration";
 export const IsInterfaceSupportedEvent = (vid: string, interfaceId: string) =>
   `isInterfaceSupportedAnswer-${vid}-${interfaceId}`;
@@ -214,6 +215,12 @@ export class VantageInfusionController extends EventEmitter {
         continue;
       }
 
+      // Blind position updates
+      if (trimmed.startsWith("S:BLIND ") || trimmed.startsWith("R:GETBLIND ")) {
+        this.emit(BlindPositionChangeEvent, parts[1], parseInt(parts[2]));
+        continue;
+      }
+
       // EL event stream — temperatures are in milli-degrees (divide by 1000)
       if (trimmed.startsWith("EL: ")) {
         const vid   = parts[2];
@@ -267,6 +274,9 @@ export class VantageInfusionController extends EventEmitter {
             break;
           case "Thermostat.GetHVACState":
             this.emit(ThermostatHVACStateChangeEvent, vid, parseInt(retVal));
+            break;
+          case "Blind.GetPosition":
+            this.emit(BlindPositionChangeEvent, vid, parseFloat(retVal));
             break;
           case "Object.IsInterfaceSupported":
             this.emit(
@@ -378,6 +388,26 @@ export class VantageInfusionController extends EventEmitter {
 
   sendThermostatSetMode(vid: string, mode: number): void {
     this.enqueueCommand(`INVOKE ${vid} Thermostat.SetMode ${mode}\n`);
+  }
+
+  sendBlindOpen(vid: string): void {
+    this.enqueueCommand(`INVOKE ${vid} Blind.Open\n`);
+  }
+
+  sendBlindClose(vid: string): void {
+    this.enqueueCommand(`INVOKE ${vid} Blind.Close\n`);
+  }
+
+  sendBlindStop(vid: string): void {
+    this.enqueueCommand(`INVOKE ${vid} Blind.Stop\n`);
+  }
+
+  sendBlindSetPosition(vid: string, position: number): void {
+    this.enqueueCommand(`INVOKE ${vid} Blind.SetPosition ${position}\n`);
+  }
+
+  sendGetBlindPosition(vid: string): void {
+    this.enqueueCommand(`INVOKE ${vid} Blind.GetPosition\n`);
   }
 
   sendIsInterfaceSupported(vid: string, interfaceId: string): void {

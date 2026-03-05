@@ -8,6 +8,7 @@ const xmlParser = new fast_xml_parser_1.XMLParser({
     isArray: (name) => name === 'Object',
 });
 const vantage_light_accessory_1 = require("./vantage-light-accessory");
+const vantage_blind_accessory_1 = require("./vantage-blind-accessory");
 const vantage_dimmer_accessory_1 = require("./vantage-dimmer-accessory");
 const vantage_fan_accessory_1 = require("./vantage-fan-accessory");
 const vantage_switch_accessory_1 = require("./vantage-switch-accessory");
@@ -94,6 +95,9 @@ class VantageStaticPlatform {
         else if (item.ObjectType === "Load") {
             this.addLoadItem(item, areaName);
         }
+        else if (item.ObjectType === "Blind" || item.ObjectType === "BlindGroup") {
+            this.addBlindItem(item);
+        }
         else {
             this.log.debug(`Skipping unsupported object type: ${item.ObjectType} (VID=${item.VID})`);
         }
@@ -143,6 +147,21 @@ class VantageStaticPlatform {
                 // relay → non-dimmable Lightbulb
                 this.accessoriesDict[vid] = new vantage_light_accessory_1.VantageLight(hap, this.log, name, vid, this.vantageController);
             }
+        });
+        this.interfaceSupportRequests.push(promise);
+    }
+    addBlindItem(item) {
+        if (item.DName && item.DName !== "")
+            item.Name = item.DName;
+        this.log.debug(`Blind discovered (VID=${item.VID}, Name=${item.Name}, Type=${item.ObjectType})`);
+        const promise = this.vantageController
+            .isInterfaceSupported(item, "Blind")
+            .then(({ support, item: resolvedItem }) => {
+            if (!support)
+                return;
+            const name = this.resolveVidName(resolvedItem.VID) || resolvedItem.Name;
+            this.log.info(`Added blind: ${name} (VID=${resolvedItem.VID}, type=${resolvedItem.ObjectType})`);
+            this.accessoriesDict[resolvedItem.VID] = new vantage_blind_accessory_1.VantageBlind(hap, this.log, name, resolvedItem.VID, this.vantageController);
         });
         this.interfaceSupportRequests.push(promise);
     }

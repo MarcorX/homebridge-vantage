@@ -17,6 +17,7 @@ const xmlParser = new XMLParser({
 });
 
 import { VantageLight, isVantageLoadObject } from "./vantage-light-accessory";
+import { VantageBlind } from "./vantage-blind-accessory";
 import { VantageDimmer } from "./vantage-dimmer-accessory";
 import { VantageFan } from "./vantage-fan-accessory";
 import { VantageSwitch } from "./vantage-switch-accessory";
@@ -162,6 +163,8 @@ class VantageStaticPlatform implements StaticPlatformPlugin {
       this.addHVACItem(item);
     } else if (item.ObjectType === "Load") {
       this.addLoadItem(item, areaName);
+    } else if (item.ObjectType === "Blind" || item.ObjectType === "BlindGroup") {
+      this.addBlindItem(item);
     } else {
       this.log.debug(`Skipping unsupported object type: ${item.ObjectType} (VID=${item.VID})`);
     }
@@ -218,6 +221,24 @@ class VantageStaticPlatform implements StaticPlatformPlugin {
           // relay → non-dimmable Lightbulb
           this.accessoriesDict[vid] = new VantageLight(hap, this.log, name, vid, this.vantageController);
         }
+      });
+
+    this.interfaceSupportRequests.push(promise);
+  }
+
+  private addBlindItem(item: any): void {
+    if (item.DName && item.DName !== "") item.Name = item.DName;
+    this.log.debug(`Blind discovered (VID=${item.VID}, Name=${item.Name}, Type=${item.ObjectType})`);
+
+    const promise = this.vantageController
+      .isInterfaceSupported(item, "Blind")
+      .then(({ support, item: resolvedItem }) => {
+        if (!support) return;
+        const name = this.resolveVidName(resolvedItem.VID) || resolvedItem.Name;
+        this.log.info(`Added blind: ${name} (VID=${resolvedItem.VID}, type=${resolvedItem.ObjectType})`);
+        this.accessoriesDict[resolvedItem.VID] = new VantageBlind(
+          hap, this.log, name, resolvedItem.VID, this.vantageController
+        );
       });
 
     this.interfaceSupportRequests.push(promise);

@@ -23,7 +23,7 @@ var __importStar = (this && this.__importStar) || function (mod) {
     return result;
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.VantageInfusionController = exports.IsInterfaceSupportedEvent = exports.EndDownloadConfigurationEvent = exports.ThermostatHVACStateChangeEvent = exports.ThermostatModeChangeEvent = exports.ThermostatCoolSetpointChangeEvent = exports.ThermostatHeatSetpointChangeEvent = exports.ThermostatIndoorTemperatureChangeEvent = exports.ThermostatOutdoorTemperatureChangeEvent = exports.LoadStatusChangeEvent = void 0;
+exports.VantageInfusionController = exports.IsInterfaceSupportedEvent = exports.EndDownloadConfigurationEvent = exports.BlindPositionChangeEvent = exports.ThermostatHVACStateChangeEvent = exports.ThermostatModeChangeEvent = exports.ThermostatCoolSetpointChangeEvent = exports.ThermostatHeatSetpointChangeEvent = exports.ThermostatIndoorTemperatureChangeEvent = exports.ThermostatOutdoorTemperatureChangeEvent = exports.LoadStatusChangeEvent = void 0;
 const net = __importStar(require("net"));
 const fs = __importStar(require("fs"));
 const fast_xml_parser_1 = require("fast-xml-parser");
@@ -57,6 +57,7 @@ exports.ThermostatHeatSetpointChangeEvent = "thermostatHeatSetpointChange";
 exports.ThermostatCoolSetpointChangeEvent = "thermostatCoolSetpointChange";
 exports.ThermostatModeChangeEvent = "thermostatModeChange";
 exports.ThermostatHVACStateChangeEvent = "thermostatHVACStateChange";
+exports.BlindPositionChangeEvent = "blindPositionChange";
 exports.EndDownloadConfigurationEvent = "endDownloadConfiguration";
 const IsInterfaceSupportedEvent = (vid, interfaceId) => `isInterfaceSupportedAnswer-${vid}-${interfaceId}`;
 exports.IsInterfaceSupportedEvent = IsInterfaceSupportedEvent;
@@ -194,6 +195,11 @@ class VantageInfusionController extends events_1.EventEmitter {
                 this.emit(exports.LoadStatusChangeEvent, parts[1], parseInt(parts[2]));
                 continue;
             }
+            // Blind position updates
+            if (trimmed.startsWith("S:BLIND ") || trimmed.startsWith("R:GETBLIND ")) {
+                this.emit(exports.BlindPositionChangeEvent, parts[1], parseInt(parts[2]));
+                continue;
+            }
             // EL event stream — temperatures are in milli-degrees (divide by 1000)
             if (trimmed.startsWith("EL: ")) {
                 const vid = parts[2];
@@ -244,6 +250,9 @@ class VantageInfusionController extends events_1.EventEmitter {
                         break;
                     case "Thermostat.GetHVACState":
                         this.emit(exports.ThermostatHVACStateChangeEvent, vid, parseInt(retVal));
+                        break;
+                    case "Blind.GetPosition":
+                        this.emit(exports.BlindPositionChangeEvent, vid, parseFloat(retVal));
                         break;
                     case "Object.IsInterfaceSupported":
                         this.emit((0, exports.IsInterfaceSupportedEvent)(parts[1].trim(), parts[4].trim()), parseInt(retVal));
@@ -336,6 +345,21 @@ class VantageInfusionController extends events_1.EventEmitter {
     }
     sendThermostatSetMode(vid, mode) {
         this.enqueueCommand(`INVOKE ${vid} Thermostat.SetMode ${mode}\n`);
+    }
+    sendBlindOpen(vid) {
+        this.enqueueCommand(`INVOKE ${vid} Blind.Open\n`);
+    }
+    sendBlindClose(vid) {
+        this.enqueueCommand(`INVOKE ${vid} Blind.Close\n`);
+    }
+    sendBlindStop(vid) {
+        this.enqueueCommand(`INVOKE ${vid} Blind.Stop\n`);
+    }
+    sendBlindSetPosition(vid, position) {
+        this.enqueueCommand(`INVOKE ${vid} Blind.SetPosition ${position}\n`);
+    }
+    sendGetBlindPosition(vid) {
+        this.enqueueCommand(`INVOKE ${vid} Blind.GetPosition\n`);
     }
     sendIsInterfaceSupported(vid, interfaceId) {
         this.enqueueCommand(`INVOKE ${vid} Object.IsInterfaceSupported ${interfaceId}\n`);
