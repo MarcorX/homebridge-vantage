@@ -160,7 +160,9 @@ class VantageStaticPlatform {
             .then(({ support, item: resolvedItem }) => {
             if (!support)
                 return;
-            const name = this.resolveVidName(resolvedItem.VID) || resolvedItem.Name;
+            const baseName = this.resolveVidName(resolvedItem.VID) || resolvedItem.Name;
+            // Append VID to guarantee unique accessory UUIDs — duplicate names cause HAP compliance failures
+            const name = `${baseName} ${resolvedItem.VID}`;
             this.log.info(`Added blind: ${name} (VID=${resolvedItem.VID}, type=${resolvedItem.ObjectType})`);
             this.accessoriesDict[resolvedItem.VID] = new vantage_blind_accessory_1.VantageBlind(hap, this.log, name, resolvedItem.VID, this.vantageController, this.blindTravelTime);
         });
